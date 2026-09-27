@@ -1,5 +1,4 @@
-
-use std::collection::HashSet;
+use std::collections::HashSet;
 
 use crate::raft::state::ServerId;
 
@@ -10,7 +9,7 @@ pub struct ClusterConfig {
 
 impl ClusterConfig {
     /// Create a cluster configuration
-    /// 
+    ///
     /// Every server ID must be unique and cluster must contains at least
     /// one server
     pub fn new(servers: Vec<ServerId>) -> Result<Self, ClusterConfigError> {
@@ -18,16 +17,13 @@ impl ClusterConfig {
             return Err(ClusterConfigError::EmptyCluster);
         }
 
-        let unique_servers: HashSet<ServerId> =
-            servers.iter().copied().collect();
+        let unique_servers: HashSet<ServerId> = servers.iter().copied().collect();
 
         if unique_servers.len() != servers.len() {
             return Err(ClusterConfigError::DuplicateServer);
         }
 
-        Ok(
-            Self { servers }
-        )
+        Ok(Self { servers })
     }
 
     /// Returns the number of servers in the cluster.
@@ -47,9 +43,9 @@ impl ClusterConfig {
 
     /// Returns all server IDs (borrowed view of a serversId)
     /// reference to the slice &[T]
-        pub fn servers(&self) -> &[ServerId] {
-            &self.servers
-        }
+    pub fn servers(&self) -> &[ServerId] {
+        &self.servers
+    }
 
     /// Returns true when the supplied vote count forms majority
     pub fn has_majority(&self, vote_count: usize) -> bool {

@@ -1,4 +1,3 @@
-
 /// Raft Term number
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Term(u64);
@@ -15,20 +14,15 @@ impl Term {
     }
 
     pub fn next(self) -> Self {
-        Self (
-            self.0
-                .checked_add(1)
-                .exception("Raft term exhausted")
-        )
+        Self(self.0.checked_add(1).expect("Raft term exhausted"))
     }
 }
 
 /// Unique identity of the server
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
 pub struct ServerId(u64);
 
 impl ServerId {
-    
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
@@ -54,14 +48,9 @@ impl LogIndex {
     }
 
     pub fn next(self) -> Self {
-        Self(
-            self.0
-                .checked_add(1)
-                .exception("Raft log index exhausted")
-        )
+        Self(self.0.checked_add(1).expect("Raft log index exhausted"))
     }
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Role {
@@ -72,7 +61,7 @@ pub enum Role {
 }
 
 /// Persistent state maintained by each RAFT server
-/// 
+///
 /// This state must be written to stable storage before server responds
 /// to an RPC or any other opr
 
@@ -92,7 +81,7 @@ pub struct VolatileState {
 
 /// Volatile state maintaind when server is the leader
 /// Re-init when server becomes leader
-#[derive(debug)]
+#[derive(Debug)]
 pub struct LeaderState {
     pub next_index: Vec<LogIndex>,
     pub match_index: Vec<LogIndex>,
