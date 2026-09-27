@@ -6,7 +6,19 @@
 //! state changes after a follower responds
 //! 
 
-use crate::raft::state::{LogIndex, ServerId};
+use crate::raft::{
+    LogEntry, RaftLog,
+};
+
+use crate::raft::rpc::{
+    AppendEntriesRequest, AppendEntriesResponse,
+};
+
+use crate::raft::state::{
+    LogIndex, 
+    ServerId,
+    Term,
+};
 
 /// Replication progress of a follower
 /// 
@@ -101,6 +113,92 @@ impl ReplicationState {
             .iter()
             .find(|(id, _)| *id == server_id)
             .map(|(_, progress)| *progress) 
+    }
+
+    /// Creates an AppendEntries request for a follower
+    /// 
+    /// next_index identifies the first entry the follower is expected to 
+    /// be missing. The entry immediate before it is used as the consistency
+    /// check 
+    pub fn build_append_entries<C: Clone>(
+        &self, 
+        server_id: ServerId,
+        leader_id: ServerId,
+        term: Term, 
+        log: &RaftLog<C>,
+        leader_commit: LogIndex,
+    ) -> Option<AppendEntriesRequest<C>> {
+
+        let progress = self.progress(server_id)?;
+        let next_index = progress.next_index;
+
+        let prev_log_index = if next_index == LogIndex::ZERO {
+            LogIndex::ZERO
+        } else {
+            LogIndex::new(
+                next_index.value() - 1
+            )
+        };
+
+        let prev_log_term = log
+            .term_at(prev_log_index)
+            .unwrap_or(Term::ZERO);
+
+        let entries: Vec<LogEntry<C>> = log
+            .iter()
+            .skip(next_index.value().saturating_sub(1) as usize)
+            .cloned()
+            .collect();
+
+        tracing::debug!(
+            leader_id = leader_id.value(),
+            follower_id = server_id.value(),
+            term = term.value(),
+            next_index = next_index.value(),
+            prev_log_index = prev_log_index.value(),
+            entry_count = entries.len(),
+            "Built AppendEntries request"
+        );
+
+        Some(AppendEntriesRequest::new(
+            term,
+            leader_id,
+            prev_log_index,
+            prev_log_term,
+            entries,
+            leader_commit,
+        ))
+    }
+
+    ///
+    /// When a server (likely a follower) we have response 
+    /// 
+    pub fn handle_response(
+        &mut self, 
+        server_id: ServerId,
+        response: &AppendEntriesResponse,
+        replicated_index: LogIndex,
+    ) -> bool {
+        if response.success {
+            tracing::debug!(
+                server_id = server_id.value(),
+                replicated_index = replicated_index.value(),
+                "AppendEntries succeeded"
+            );
+
+            // basically updating the match_index and next_index
+            self.record_success(
+                server_id, 
+                replicated_index,
+            )
+        } else {
+            tracing::debug!(
+                server_id = server_id.value(),
+                "AppendEntries failed; backing up next_index"
+            );
+
+            self.record_failure(server_id)
+        }
     }
 
     /// Records a successful AppendEntries response.

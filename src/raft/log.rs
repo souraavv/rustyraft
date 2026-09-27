@@ -14,7 +14,7 @@
 use crate::raft::state::{LogIndex, Term};
 
 /// Each entry has the term in which it was added + Generic Command
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct LogEntry<C> {
     pub term: Term,
     pub command: C,

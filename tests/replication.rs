@@ -2,9 +2,13 @@ use rustyraft::raft::replication::{
     FollowerProgress,
     ReplicationState,
 };
+
 use rustyraft::raft::{
+    LogEntry,
     LogIndex,
+    RaftLog,
     ServerId,
+    Term,
 };
 
 #[test]
@@ -169,4 +173,160 @@ fn unknown_follower_has_no_progress() {
     assert!(
         state.progress(ServerId::new(99)).is_none()
     );
+}
+
+fn test_log() -> RaftLog<String> {
+    let mut log = RaftLog::new();
+
+    log.append(LogEntry::new(
+        Term::new(1),
+        "A".to_string(),
+    ));
+
+    log.append(LogEntry::new(
+        Term::new(1),
+        "B".to_string(),
+    ));
+
+    log.append(LogEntry::new(
+        Term::new(2),
+        "C".to_string(),
+    ));
+
+    log.append(LogEntry::new(
+        Term::new(2),
+        "D".to_string(),
+    ));
+
+    log
+}
+
+#[test]
+fn build_append_entries_sends_entries_from_next_index() {
+    let follower = ServerId::new(2);
+    let leader = ServerId::new(1);
+
+    let log = test_log();
+
+    let replication = ReplicationState::new(
+        &[follower],
+        log.last_index(),
+    );
+
+    let request = replication
+        .build_append_entries(
+            follower,
+            leader,
+            Term::new(2),
+            &log,
+            LogIndex::ZERO,
+        )
+        .unwrap();
+
+    assert_eq!(
+        request.prev_log_index,
+        LogIndex::new(4)
+    );
+
+    assert_eq!(
+        request.prev_log_term,
+        Term::new(2)
+    );
+
+    assert!(request.entries.is_empty());
+}
+
+#[test]
+fn build_append_entries_uses_next_index_as_start() {
+    let follower = ServerId::new(2);
+    let leader = ServerId::new(1);
+
+    // At this point the leader has only entries 1 and 2.
+    let mut log = RaftLog::new();
+
+    log.append(LogEntry::new(
+        Term::new(1),
+        "A".to_string(),
+    ));
+
+    log.append(LogEntry::new(
+        Term::new(1),
+        "B".to_string(),
+    ));
+
+    // The follower is initially expected to receive entry 3.
+    let replication = ReplicationState::new(
+        &[follower],
+        log.last_index(),
+    );
+
+    // The leader now has two additional entries.
+    log.append(LogEntry::new(
+        Term::new(2),
+        "C".to_string(),
+    ));
+
+    log.append(LogEntry::new(
+        Term::new(2),
+        "D".to_string(),
+    ));
+
+    let request = replication
+        .build_append_entries(
+            follower,
+            leader,
+            Term::new(2),
+            &log,
+            LogIndex::new(2),
+        )
+        .unwrap();
+
+    assert_eq!(
+        request.prev_log_index,
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        request.prev_log_term,
+        Term::new(1)
+    );
+
+    assert_eq!(
+        request.entries.len(),
+        2
+    );
+
+    assert_eq!(
+        request.entries[0].term,
+        Term::new(2)
+    );
+
+    assert_eq!(
+        request.entries[1].term,
+        Term::new(2)
+    );
+}
+
+#[test]
+fn build_append_entries_returns_none_for_unknown_follower() {
+    let follower = ServerId::new(2);
+    let unknown = ServerId::new(3);
+    let leader = ServerId::new(1);
+
+    let log = test_log();
+
+    let replication = ReplicationState::new(
+        &[follower],
+        log.last_index(),
+    );
+
+    let request = replication.build_append_entries(
+        unknown,
+        leader,
+        Term::new(2),
+        &log,
+        LogIndex::ZERO,
+    );
+
+    assert!(request.is_none());
 }
