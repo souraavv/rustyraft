@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./misc/image.png" alt="Rusty Raft" width="400">
+</p>
+
 - [RustyRaft](#rustyraft)
 - [Why RustyRaft?](#why-rustyraft)
 - [The basic idea](#the-basic-idea)
@@ -12,8 +16,6 @@
 - [Replication is not commitment](#replication-is-not-commitment)
 - [Commit index](#commit-index)
 - [References](#references)
-
-![Rusty Raft](./misc/image.png)
 
 ## RustyRaft
 
