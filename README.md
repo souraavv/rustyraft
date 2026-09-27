@@ -1,14 +1,17 @@
-- [Why `LogIndex` starts at zero](#why-logindex-starts-at-zero)
-  - [Election](#election)
-  - [Which candidate gets the vote?](#which-candidate-gets-the-vote)
-  - [RequestVote RPC](#requestvote-rpc)
-  - [Replication](#replication)
-  - [Why `match_index` must not go backwards](#why-match_index-must-not-go-backwards)
-  - [AppendEntries](#appendentries)
-  - [Replication is not commitment](#replication-is-not-commitment)
-  - [Commit index](#commit-index)
+- [RustyRaft](#rustyraft)
+- [Why RustyRaft?](#why-rustyraft)
+- [The basic idea](#the-basic-idea)
+- [Terms](#terms)
+- [The log](#the-log)
+- [Election](#election)
+- [Which candidate gets the vote?](#which-candidate-gets-the-vote)
+- [RequestVote RPC](#requestvote-rpc)
+- [Replication](#replication)
+- [Why `match_index` must not go backwards](#why-match_index-must-not-go-backwards)
+- [AppendEntries](#appendentries)
+- [Replication is not commitment](#replication-is-not-commitment)
+- [Commit index](#commit-index)
 - [References](#references)
-
 
 ## RustyRaft
 
@@ -30,12 +33,9 @@ be tested with deterministic failures such as:
 - storage failures
 
 The main design principle is simple:
+Keep the Raft protocol separate from networking, storage and timing.
 
-> Keep the Raft protocol separate from networking, storage and timing.
-
-This makes the core logic easier to understand and, more importantly,
-easier to test.
-
+This makes the core logic easier to understand and, easier to test.
 
 ## Why RustyRaft?
 
@@ -132,32 +132,6 @@ Second, an entry contains its term.
 The term is not just metadata. It is used when comparing logs and when
 deciding whether an entry can be committed.
 
----
-
-# Why `LogIndex` starts at zero
-
-Raft log entries are one-based.
-
-The first real entry is index 1.
-
-```text
-index:
-
-    0       1       2       3
-    |       |       |       |
-  before   first   second  third
-```
-
-`LogIndex::ZERO` therefore represents the position before the first entry.
-
-This is useful because some Raft RPCs need to refer to the position just
-before an entry.
-
-Internally, the Rust `Vec` is still zero-based. `RaftLog` keeps that detail
-inside the log implementation.
-
-So the rest of the code can work with Raft indexes without worrying about
-`Vec` indexes.
 
 ## Election
 
@@ -470,7 +444,7 @@ The current commit calculation looks for the highest index that:
 2. belongs to the leader's current term
 3. is ahead of the current `commit_index`
 
-# References
+## References
 
 The main reference for the implementation is the Raft paper.
 
