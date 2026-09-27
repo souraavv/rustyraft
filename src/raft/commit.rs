@@ -18,6 +18,11 @@ use crate::raft::state::{LogIndex, Term};
 ///
 /// The function will return the highest such eligible index greater than
 /// current commit
+/// 
+/// We can commit an entry if it present on the majority
+/// 
+/// We are passing the match_index of each follower (from the FollowerState)
+/// 
 pub fn find_commit_index(
     current_commit: LogIndex,
     current_term: Term,
@@ -66,11 +71,17 @@ pub fn find_commit_index(
             "Checking log index for commitment"
         );
 
-        if replicated_count >= majority
-            && term_at(index) == Some(current_term)
-        {
-            candidate = index;
+        // If we have majority + majority on the term which I want to commit
+        // because remember a leader only commit logs from its current term
+        // the majority might be agreeging on a index which might 
+        // be <= leaders current log index so we have to be careful
 
+        let entry_added_by_current_leader_term: bool
+            = term_at(index) == Some(current_term);
+
+        let have_majority:bool = replicated_count >= majority;
+        if have_majority && entry_added_by_current_leader_term {
+            candidate = index;
             tracing::info!(
                 old_commit_index = current_commit.value(),
                 new_commit_index = candidate.value(),

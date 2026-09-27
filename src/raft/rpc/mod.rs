@@ -14,10 +14,10 @@ pub mod request_vote;
 
 pub use append_entries::{
     AppendEntriesRequest, 
-    AppendEntriesResponse
+    AppendEntriesResponse,
 };
 
 pub use request_vote::{
     RequestVoteRequest, 
-    RequestVoteResponse
+    RequestVoteResponse,
 };

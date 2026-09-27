@@ -5,7 +5,6 @@
 //! by design we kept the network connections, timers, or durable storage
 //! outside the node
 
-use crate::cluster;
 use crate::raft::Role::{Follower};
 use crate::raft::log::RaftLog;
 
@@ -15,12 +14,15 @@ use crate::raft::election::{
 };
 
 use crate::raft::rpc::{
+    AppendEntriesRequest,
+    AppendEntriesResponse,
     RequestVoteRequest,
     RequestVoteResponse,
 };
 
 use crate::raft::state::{
-    LeaderState, 
+    LeaderState,
+    LogIndex,
     PersistentState, 
     Role, 
     ServerId, 
@@ -100,6 +102,10 @@ impl<C> RaftNode<C> {
         }
     }
 
+    // -----------------------------------------------
+    // -------------------- Voting -------------------
+    // -----------------------------------------------
+    
     /// Hanldes a RequestVote RPC
     /// 
     /// The node owns the state changes required by the RPC while election
@@ -370,6 +376,187 @@ impl<C> RaftNode<C> {
             follower_count = followers.len(),
             "Raft node became leader"
         );
+    }
+
+    // -----------------------------------------------
+    // ----------- Append Entries -------------------
+    // ----------------------------------------------
+    /// Handles an AppendEntries RPC from the leader.
+    ///
+    /// AppendEntries is used both for log replication and heartbeats.
+    /// The follower first verifies that the leader's previous log entry
+    /// matches its own log before modifying anything.
+    pub fn handle_append_entries(
+        &mut self, 
+        request: AppendEntriesRequest<C>,
+    ) -> AppendEntriesResponse {
+                tracing::debug!(
+            server_id = self.id.value(),
+            leader_id = request.leader_id.value(),
+            request_term = request.term.value(),
+            current_term = self.current_term().value(),
+            prev_log_index = request.prev_log_index.value(),
+            entry_count = request.entries.len(),
+            "Handling AppendEntries"
+        );
+
+        // A request from an older term cannot come from the current
+        // leader, so reject it without modifying local state.
+        if request.term < self.persistent.current_term {
+            tracing::debug!(
+                server_id = self.id.value(),
+                leader_id = request.leader_id.value(),
+                request_term = request.term.value(),
+                current_term = self.current_term().value(),
+                "Rejecting AppendEntries from older term"
+            );
+
+            return AppendEntriesResponse::failure(
+                self.persistent.current_term,
+            );
+        }
+
+        // A newer term means this node has stale state. Move to the
+        // leader's term and become a follower before processing the RPC.
+        if request.term > self.persistent.current_term {
+            tracing::info!(
+                server_id = self.id.value(),
+                old_term = self.persistent.current_term.value(),
+                new_term = request.term.value(),
+                leader_id = request.leader_id.value(),
+                "Updating term from AppendEntries"
+            );
+
+            self.persistent.current_term = request.term;
+            self.persistent.voted_for = None;
+            // reset back to the follower
+            self.role = Role::Follower;
+            self.leader = None;
+            self.election = None;
+        } else if self.role != Role::Follower {
+            // A valid AppendEntries from the current term establishes
+            // that another server is acting as leader. A candidate or
+            // leader must therefore stop its current election/leadership.
+            tracing::info!(
+                server_id = self.id.value(),
+                leader_id = request.leader_id.value(),
+                term = request.term.value(),
+                "Stepping down after AppendEntries"
+            );
+
+            // reset back to the follower
+            self.role = Role::Follower;
+            self.leader = None;
+            self.election = None;
+        }
+
+        // The previous log entry is the consistency point between the
+        // leader and follower. If it does not exist or has a different
+        // term, the follower must reject the request.
+        if request.prev_log_index != LogIndex::ZERO {
+            let previous_entry_matches = self
+                .persistent
+                .log
+                .matches(request.prev_log_index, request.prev_log_term);
+
+            if !previous_entry_matches {
+                tracing::debug!(
+                    server_id = self.id.value(),
+                    leader_id = request.leader_id.value(),
+                    prev_log_index = request.prev_log_index.value(),
+                    prev_log_term = request.prev_log_term.value(),
+                    local_last_index =
+                        self.persistent.log.last_index().value(),
+                    "AppendEntries log consistency check failed"
+                );
+
+                // If our logs doesn't match I will simply reply the leader
+                // that I can proceed.. and this is where leader will start
+                // backtracking from nextIndex until it found.. and that's 
+                // where recovery start..
+                return AppendEntriesResponse::failure(
+                    self.persistent.current_term,
+                );
+            }
+        }
+
+        // The previous entry matches, so the leader and follower agree
+        // up to this point. Reconcile the entries that follow it.
+
+        // incoming entries: request.entries (one or many)
+        // They will go at prev_log_index + offset + 1 
+        for (offset, entry) in request.entries.into_iter().enumerate() {
+            let index = LogIndex::new(
+                request.prev_log_index.value() + offset as u64 + 1,
+            );
+
+            // Fetch the term at the next log entry (log = Vec<LogEntry<C>>)
+            // each entry contains term and Command 
+            // we are interested in term at that index (start the current 
+            // length which is essentially the prev_log_index provided
+            // by the leader)
+            match self.persistent.log.term_at(index) {
+                Some(local_term) if local_term == entry.term => {
+                    // This entry already matches the leader's entry.
+                    // Nothing needs to be changed.
+                }
+
+                Some(_) => {
+                    // A different term at this index means the follower
+                    // has a conflicting entry. Remove it and everything
+                    // after it before appending the leader's entries.
+                    tracing::debug!(
+                        server_id = self.id.value(),
+                        index = index.value(),
+                        "Truncating conflicting log entries"
+                    );
+
+                    self.persistent.log.truncate_from(index);
+                    self.persistent.log.append(entry);
+                }
+
+                None => {
+                    // The follower does not have this entry yet, so
+                    // append the missing leader entry.
+                    self.persistent.log.append(entry);
+                }
+            }
+        }
+
+        // A leader tells follower how far the log is committed
+        // A follower can't commit beyond that
+        if request.leader_commit > self.volatile.commit_index {
+            // can't exceed my length anyway thus min of the leader commit_index
+            let new_commit_index = std::cmp::min(
+                request.leader_commit,
+                self.persistent.log.last_index(),
+            );
+
+            tracing::debug!(
+                server_id = self.id.value(),
+                old_commit_index =
+                    self.volatile.commit_index.value(),
+                new_commit_index = new_commit_index.value(),
+                leader_commit = request.leader_commit.value(),
+                "Advancing follower commit index"
+            );
+            self.volatile.commit_index = new_commit_index;
+        }
+
+        tracing::debug!(
+            server_id = self.id.value(),
+            leader_id = request.leader_id.value(),
+            term = self.persistent.current_term.value(),
+            last_log_index =
+                self.persistent.log.last_index().value(),
+            commit_index = self.volatile.commit_index.value(),
+            "AppendEntries accepted"
+        );
+
+        AppendEntriesResponse::success(
+            self.persistent.current_term,
+        )
+        
     }
 
     /// ---- Helpers - Getters ----
