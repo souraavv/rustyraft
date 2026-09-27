@@ -1,14 +1,38 @@
-use rustyraft::raft::election::{ElectionState, is_log_up_to_date};
-use rustyraft::raft::{LogIndex, ServerId, Term};
+use rustyraft::raft::election::{
+    ElectionState,
+    is_log_up_to_date,
+};
+
+use rustyraft::raft::{
+    LogIndex,
+    ServerId,
+    Term,
+};
 
 #[test]
 fn candidate_votes_for_itself() {
     let candidate = ServerId::new(1);
-
-    let election = ElectionState::new(candidate);
+    let election = ElectionState::new(
+        candidate,
+        Term::new(1),
+    );
 
     assert_eq!(election.vote_count(), 1);
     assert!(election.has_vote_from(candidate));
+}
+
+#[test]
+fn election_records_candidate_and_term() {
+    let candidate = ServerId::new(1);
+    let term = Term::new(3);
+
+    let election = ElectionState::new(
+        candidate,
+        term,
+    );
+
+    assert_eq!(election.candidate_id(), candidate);
+    assert_eq!(election.term(), term);
 }
 
 #[test]
@@ -16,7 +40,10 @@ fn duplicate_vote_is_not_counted_twice() {
     let candidate = ServerId::new(1);
     let voter = ServerId::new(2);
 
-    let mut election = ElectionState::new(candidate);
+    let mut election = ElectionState::new(
+        candidate,
+        Term::new(1),
+    );
 
     election.record_vote(voter);
     election.record_vote(voter);
@@ -26,7 +53,10 @@ fn duplicate_vote_is_not_counted_twice() {
 
 #[test]
 fn three_votes_are_majority_of_five() {
-    let mut election = ElectionState::new(ServerId::new(1));
+    let mut election = ElectionState::new(
+        ServerId::new(1),
+        Term::new(1),
+    );
 
     election.record_vote(ServerId::new(2));
     election.record_vote(ServerId::new(3));
@@ -37,7 +67,10 @@ fn three_votes_are_majority_of_five() {
 
 #[test]
 fn two_votes_are_not_majority_of_five() {
-    let mut election = ElectionState::new(ServerId::new(1));
+    let mut election = ElectionState::new(
+        ServerId::new(1),
+        Term::new(1),
+    );
 
     election.record_vote(ServerId::new(2));
 

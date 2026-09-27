@@ -1,45 +1,264 @@
-use rustyraft::raft::{LogIndex, RaftNode, Role, ServerId, Term};
+use rustyraft::raft::{
+    RaftNode,
+    Role,
+    ServerId,
+    LogIndex,
+    Term,
+};
+use rustyraft::raft::rpc::{
+    RequestVoteRequest,
+};
 
 #[test]
-fn new_node_is_follower() {
-    let node = RaftNode::<String>::new(ServerId::new(1));
+fn request_vote_rejects_older_term() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
 
-    assert_eq!(node.id(), ServerId::new(1));
+    // Move the node to term 2.
+    let request = RequestVoteRequest::new(
+        Term::new(2),
+        ServerId::new(2),
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    let response = node.handle_request_vote(request);
+
+    assert!(response.vote_granted);
+    assert_eq!(node.current_term(), Term::new(2));
+
+    // Term 1 is now older than the node's current term 2.
+    let request = RequestVoteRequest::new(
+        Term::new(1),
+        ServerId::new(3),
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    let response = node.handle_request_vote(request);
+
+    assert!(!response.vote_granted);
+    assert_eq!(response.term, Term::new(2));
+    assert_eq!(node.current_term(), Term::new(2));
+}
+
+
+#[test]
+fn request_vote_updates_to_higher_term() {
+    let mut node = RaftNode::<String>::new(ServerId::new(1));
+
+    let request = RequestVoteRequest::new(
+        Term::new(3),
+        ServerId::new(2),
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    let response = node.handle_request_vote(request);
+
+    assert_eq!(node.current_term(), Term::new(3));
     assert_eq!(node.role(), Role::Follower);
+    assert!(response.vote_granted);
 }
 
 #[test]
-fn new_node_starts_at_term_zero() {
-    let node = RaftNode::<String>::new(ServerId::new(1));
+fn request_vote_records_granted_vote() {
+    let mut node = RaftNode::<String>::new(ServerId::new(1));
 
-    assert_eq!(node.current_term(), Term::ZERO);
+    let candidate = ServerId::new(2);
+
+    let request = RequestVoteRequest::new(
+        Term::new(1),
+        candidate,
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    let response = node.handle_request_vote(request);
+
+    assert!(response.vote_granted);
+    assert_eq!(node.voted_for(), Some(candidate));
 }
 
 #[test]
-fn new_node_has_not_voted() {
-    let node = RaftNode::<String>::new(ServerId::new(1));
+fn request_vote_rejects_different_candidate_after_voting() {
+    let mut node = RaftNode::<String>::new(ServerId::new(1));
 
-    assert_eq!(node.voted_for(), None);
+    let first_candidate = ServerId::new(2);
+    let second_candidate = ServerId::new(3);
+
+    let first_request = RequestVoteRequest::new(
+        Term::new(1),
+        first_candidate,
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    let second_request = RequestVoteRequest::new(
+        Term::new(1),
+        second_candidate,
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    assert!(
+        node.handle_request_vote(first_request)
+            .vote_granted
+    );
+
+    assert!(
+        !node
+            .handle_request_vote(second_request)
+            .vote_granted
+    );
+
+    assert_eq!(
+        node.voted_for(),
+        Some(first_candidate)
+    );
 }
 
 #[test]
-fn new_node_has_empty_log() {
-    let node = RaftNode::<String>::new(ServerId::new(1));
+fn request_vote_allows_same_candidate_again() {
+    let mut node = RaftNode::<String>::new(ServerId::new(1));
 
-    assert!(node.log().is_empty());
-    assert_eq!(node.log().last_index(), LogIndex::ZERO);
+    let candidate = ServerId::new(2);
+
+    let request = RequestVoteRequest::new(
+        Term::new(1),
+        candidate,
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    assert!(
+        node.handle_request_vote(request).vote_granted
+    );
+
+    let request = RequestVoteRequest::new(
+        Term::new(1),
+        candidate,
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    assert!(
+        node.handle_request_vote(request).vote_granted
+    );
 }
 
 #[test]
-fn new_node_has_zero_commit_index() {
-    let node = RaftNode::<String>::new(ServerId::new(1));
+fn request_vote_rejects_candidate_with_older_log() {
+    let mut node = RaftNode::<String>::new(ServerId::new(1));
 
-    assert_eq!(node.commit_index(), LogIndex::ZERO);
+    // TODO: Add local log entries once node log mutation is exposed.
+
+    let request = RequestVoteRequest::new(
+        Term::new(1),
+        ServerId::new(2),
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    let response = node.handle_request_vote(request);
+
+    assert!(response.vote_granted);
 }
 
 #[test]
-fn new_node_has_zero_last_applied() {
-    let node = RaftNode::<String>::new(ServerId::new(1));
+fn start_election_increments_term() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
 
-    assert_eq!(node.last_applied(), LogIndex::ZERO);
+    node.start_election();
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1),
+    );
 }
+
+#[test]
+fn start_election_makes_node_candidate() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
+
+    node.start_election();
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate,
+    );
+}
+
+#[test]
+fn start_election_votes_for_self() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
+
+    node.start_election();
+
+    assert_eq!(
+        node.voted_for(),
+        Some(ServerId::new(1)),
+    );
+}
+
+#[test]
+fn start_election_creates_election_state() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
+
+    node.start_election();
+
+    let election = node
+        .election()
+        .expect("Election state should exist");
+
+    assert_eq!(
+        election.candidate_id(),
+        ServerId::new(1),
+    );
+
+    assert_eq!(
+        election.term(),
+        Term::new(1),
+    );
+
+    assert_eq!(
+        election.vote_count(),
+        1,
+    );
+}
+
+#[test]
+fn starting_another_election_increments_term_again() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
+
+    node.start_election();
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1),
+    );
+
+    node.start_election();
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(2),
+    );
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate,
+    );
+}
+
