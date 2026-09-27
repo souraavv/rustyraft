@@ -1,3 +1,5 @@
+use crate::raft::replication::ReplicationState;
+
 /// Raft Term number
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
 pub struct Term(u64);
@@ -83,6 +85,23 @@ pub struct VolatileState {
 /// Re-init when server becomes leader
 #[derive(Debug)]
 pub struct LeaderState {
-    pub next_index: Vec<LogIndex>,
-    pub match_index: Vec<LogIndex>,
+    pub replication: ReplicationState,
+}
+
+impl LeaderState {
+    /// Creates leader state for a newly elected leader.
+    ///
+    /// ReplicationState initializes next_index and match_index for
+    /// every follower.
+    pub fn new(
+        followers: &[ServerId],
+        last_log_index: LogIndex,
+    ) -> Self {
+        Self {
+            replication: ReplicationState::new(
+                followers,
+                last_log_index,
+            ),
+        }
+    }
 }

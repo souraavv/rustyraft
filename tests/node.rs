@@ -7,6 +7,7 @@ use rustyraft::raft::{
 };
 use rustyraft::raft::rpc::{
     RequestVoteRequest,
+    RequestVoteResponse,
 };
 
 #[test]
@@ -262,3 +263,118 @@ fn starting_another_election_increments_term_again() {
     );
 }
 
+#[test]
+fn candidate_stays_candidate_without_majority() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
+
+    let servers = vec![
+        ServerId::new(1),
+        ServerId::new(2),
+        ServerId::new(3),
+        ServerId::new(4),
+        ServerId::new(5),
+    ];
+
+    node.start_election();
+
+    let response = RequestVoteResponse::granted(
+        Term::new(1),
+    );
+
+    node.handle_request_vote_response(
+        ServerId::new(2),
+        response,
+        &servers,
+    );
+
+    assert_eq!(node.role(), Role::Candidate);
+}
+
+#[test]
+fn candidate_becomes_leader_after_majority() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
+
+    let servers = vec![
+        ServerId::new(1),
+        ServerId::new(2),
+        ServerId::new(3),
+        ServerId::new(4),
+        ServerId::new(5),
+    ];
+
+    node.start_election();
+
+    node.handle_request_vote_response(
+        ServerId::new(2),
+        RequestVoteResponse::granted(Term::new(1)),
+        &servers,
+    );
+
+    assert_eq!(node.role(), Role::Candidate);
+
+    node.handle_request_vote_response(
+        ServerId::new(3),
+        RequestVoteResponse::granted(Term::new(1)),
+        &servers,
+    );
+
+    assert_eq!(node.role(), Role::Leader);
+}
+
+#[test]
+fn duplicate_vote_does_not_make_candidate_leader() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
+
+    let servers = vec![
+        ServerId::new(1),
+        ServerId::new(2),
+        ServerId::new(3),
+        ServerId::new(4),
+        ServerId::new(5),
+    ];
+
+    node.start_election();
+
+    let response = RequestVoteResponse::granted(
+        Term::new(1),
+    );
+
+    node.handle_request_vote_response(
+        ServerId::new(2),
+        response,
+        &servers,
+    );
+
+    assert_eq!(node.role(), Role::Candidate);
+}
+
+#[test]
+fn higher_term_vote_response_makes_candidate_follower() {
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1),
+    );
+
+    let servers = vec![
+        ServerId::new(1),
+        ServerId::new(2),
+        ServerId::new(3),
+    ];
+
+    node.start_election();
+
+    node.handle_request_vote_response(
+        ServerId::new(2),
+        RequestVoteResponse::granted(Term::new(2)),
+        &servers,
+    );
+
+    assert_eq!(node.role(), Role::Follower);
+    assert_eq!(node.current_term(), Term::new(2));
+    assert_eq!(node.voted_for(), None);
+}
