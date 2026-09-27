@@ -51,15 +51,22 @@ impl FollowerProgress {
     /// if current index is less than that then we will move to that, else
     /// ignore, keep it higher anyway we will override.
     /// All leader cares is the next index.
+    /// 
+    /// match index - what is the highest entry I know this follower has ?
+    /// next index - What entry should I try sending next ?
     pub fn record_success(&mut self, replicated_index: LogIndex) {
+        // handle the network dealyed packets i.e., ingore if the replicated
+        // index < match_index
         if replicated_index > self.match_index {
             self.match_index = replicated_index;
         }
 
-        let next_index = replicated_index.next();
+        // temporary
+        let new_next_index = replicated_index.next();
 
-        if next_index > self.next_index {
-            self.next_index = next_index;
+        // Safely from delayed old packets - tolerant to those
+        if new_next_index > self.next_index {
+            self.next_index = new_next_index;
         }
     }
 
@@ -122,7 +129,7 @@ impl ReplicationState {
     /// check 
     pub fn build_append_entries<C: Clone>(
         &self, 
-        server_id: ServerId,
+        server_id: ServerId,  // follower ID
         leader_id: ServerId,
         term: Term, 
         log: &RaftLog<C>,

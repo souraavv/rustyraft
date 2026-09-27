@@ -5,6 +5,7 @@
 //! by design we kept the network connections, timers, or durable storage
 //! outside the node
 
+use crate::raft::LogEntry;
 use crate::raft::Role::{Follower};
 use crate::raft::log::RaftLog;
 
@@ -13,6 +14,7 @@ use crate::raft::election::{
     ElectionState,
 };
 
+use crate::raft::replication::FollowerProgress;
 use crate::raft::rpc::{
     AppendEntriesRequest,
     AppendEntriesResponse,
@@ -557,6 +559,151 @@ impl<C> RaftNode<C> {
             self.persistent.current_term,
         )
         
+    }
+
+    /// Build an AppendEntries request for a follower
+    /// 
+    /// The leader specific replication state determines which log entry 
+    /// the follower needs the next
+    pub fn build_append_entries(
+        &self, 
+        follower_id: ServerId,
+    ) -> Option<AppendEntriesRequest<C>>
+    where 
+        C: Clone,
+    {
+        let leader = self.leader.as_ref()?;
+
+        leader.replication.build_append_entries(
+            follower_id,
+            self.id, 
+            self.persistent.current_term,
+            &self.persistent.log, 
+            self.volatile.commit_index,
+        )
+    }
+
+    /// Handles an AppendEntries resopnse from a follower 
+    /// 
+    /// Successfull replication advances the follower progress (succes_progress)
+    /// Failed replication moves next_index backward so the leader 
+    /// can retry from an earlier log position 
+    pub fn handle_append_entries_response(
+        &mut self, 
+        follower_id: ServerId,
+        response: AppendEntriesResponse,
+        replicated_index: LogIndex,
+    ) {
+
+        if self.role != Role::Leader {
+            tracing::debug!(
+                server_id = self.id.value(),
+                follower_id = follower_id.value(),
+                "Ignoring AppendEntries response because node is not leader"
+            );
+
+            return;
+        }
+
+        // Some else become leader
+        // A response from a newer term means this leader has stale
+        // state and must step down before processing the response.
+        if response.term > self.persistent.current_term {
+            self.step_down_for_newer_term(response.term);
+            return;
+        }
+
+        // Stale network packets
+        // A response from an older term belongs to an earlier
+        // interaction and cannot affect the current leader state.
+        if response.term < self.persistent.current_term {
+            tracing::debug!(
+                server_id = self.id.value(),
+                follower_id = follower_id.value(),
+                response_term = response.term.value(),
+                current_term = self.persistent.current_term.value(),
+                "Ignoring stale AppendEntries response"
+            );
+            return;
+        }
+
+        let leader = match self.leader.as_mut() {
+            Some(leader) => leader,
+            None => {
+                tracing::warn!(
+                    server_id = self.id.value(),
+                    "Leader state missing while handling response"
+                );
+
+                return;
+            }
+        };
+
+        leader.replication.handle_response(
+            follower_id,
+            &response,
+            replicated_index,
+        );
+
+    }
+
+    /// Appends a client command to the leader's log
+    /// 
+    /// Only the leader accept the new commands. The command is appended
+    /// locally first; replicated to the followers happen separately
+    
+    pub fn append_entry(
+        &mut self, 
+        command: C,
+    ) -> Option<LogIndex> {
+        if self.role != Role::Leader {
+            tracing::debug!(
+                server_id = self.id.value(),
+                role = ?self.role,
+                "Rejecting log entry because node is not leader"
+            );
+
+            return None;
+        }
+
+        let term = self.persistent.current_term;
+        let index = self.persistent.log.append(
+            LogEntry::new(term, command),
+        );
+
+        tracing::info!(
+            server_id = self.id.value(),
+            term = term.value(),
+            log_index = index.value(),
+            "Appended command to leader log"
+        );
+
+        Some(index)
+    }
+
+
+    fn step_down_for_newer_term(&mut self, term: Term) {
+        tracing::info!(
+            server_id = self.id.value(),
+            old_term = self.persistent.current_term.value(),
+            new_term = term.value(),
+            "Stepping down because a newer term was observed"
+        );
+
+        self.persistent.current_term = term;
+        self.persistent.voted_for = None;
+        self.role = Role::Follower;
+        self.leader = None;
+        self.election = None;
+    }
+
+    pub fn follower_progress(
+        &self,
+        follower_id: ServerId,
+    ) -> Option<FollowerProgress> {
+        self.leader.as_ref()?
+            .replication
+            .progress(follower_id)
     }
 
     /// ---- Helpers - Getters ----

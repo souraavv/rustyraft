@@ -330,3 +330,63 @@ fn build_append_entries_returns_none_for_unknown_follower() {
 
     assert!(request.is_none());
 }
+
+#[test]
+fn successful_append_entries_response_advances_progress() {
+    let follower = ServerId::new(2);
+
+    let mut state = ReplicationState::new(
+        &[follower],
+        LogIndex::new(5),
+    );
+
+    let response = rustyraft::raft::rpc::AppendEntriesResponse::success(
+        Term::new(1),
+    );
+
+    assert!(state.handle_response(
+        follower,
+        &response,
+        LogIndex::new(5),
+    ));
+
+    assert_eq!(
+        state.match_index(follower),
+        Some(LogIndex::new(5))
+    );
+
+    assert_eq!(
+        state.next_index(follower),
+        Some(LogIndex::new(6))
+    );
+}
+
+#[test]
+fn failed_append_entries_response_backs_up_next_index() {
+    let follower = ServerId::new(2);
+
+    let mut state = ReplicationState::new(
+        &[follower],
+        LogIndex::new(5),
+    );
+
+    let response = rustyraft::raft::rpc::AppendEntriesResponse::failure(
+        Term::new(1),
+    );
+
+    assert!(state.handle_response(
+        follower,
+        &response,
+        LogIndex::ZERO,
+    ));
+
+    assert_eq!(
+        state.next_index(follower),
+        Some(LogIndex::new(5))
+    );
+
+    assert_eq!(
+        state.match_index(follower),
+        Some(LogIndex::ZERO)
+    );
+}
