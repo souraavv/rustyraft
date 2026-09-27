@@ -13,6 +13,8 @@
 - [Commit index](#commit-index)
 - [References](#references)
 
+![Rusty Raft](./misc/image.png)
+
 ## RustyRaft
 
 Rust implementation of the Raft consensus algorithm.
