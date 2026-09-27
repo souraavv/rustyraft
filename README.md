@@ -1,4 +1,16 @@
-# RustyRaft
+- [Why `LogIndex` starts at zero](#why-logindex-starts-at-zero)
+  - [Election](#election)
+  - [Which candidate gets the vote?](#which-candidate-gets-the-vote)
+  - [RequestVote RPC](#requestvote-rpc)
+  - [Replication](#replication)
+  - [Why `match_index` must not go backwards](#why-match_index-must-not-go-backwards)
+  - [AppendEntries](#appendentries)
+  - [Replication is not commitment](#replication-is-not-commitment)
+  - [Commit index](#commit-index)
+- [References](#references)
+
+
+## RustyRaft
 
 Rust implementation of the Raft consensus algorithm.
 
@@ -24,9 +36,8 @@ The main design principle is simple:
 This makes the core logic easier to understand and, more importantly,
 easier to test.
 
----
 
-# Why RustyRaft?
+## Why RustyRaft?
 
 Raft looks fairly simple when you read the high-level description:
 
@@ -53,9 +64,7 @@ them behind threads, sleeps and real network connections.
 That is the main reason the protocol logic is being kept separate from
 networking, storage and timing.
 
----
-
-# The basic idea
+## The basic idea
 
 A Raft cluster has a number of servers.
 
@@ -79,9 +88,7 @@ flowchart LR
 The important thing is that these are states of the **same server**.
 There isn't a completely different object for a leader or a follower.
 
----
-
-# Terms
+## Terms
 
 A term is Raft's logical clock.
 
@@ -99,9 +106,8 @@ This is why `Term` is represented as its own type instead of passing
 
 The same idea is used for `LogIndex`.
 
----
 
-# The log
+## The log
 
 The Raft log is an ordered sequence of commands.
 
@@ -153,9 +159,7 @@ inside the log implementation.
 So the rest of the code can work with Raft indexes without worrying about
 `Vec` indexes.
 
----
-
-# Election
+## Election
 
 When a follower doesn't hear from a leader for long enough, it starts an
 election.
@@ -198,9 +202,7 @@ S2 → vote again
 
 it must still count as one vote.
 
----
-
-# Which candidate gets the vote?
+## Which candidate gets the vote?
 
 A candidate does not automatically get a vote just because it asks for one.
 
@@ -237,9 +239,8 @@ Raft rule in its own right and should be easy to test.
 See the `RequestVote` section of the
 [Raft notes](https://github.com/souraavv/whitepapers-and-books/blob/main/whitepapers/raft.md#requestvote-rpc).
 
----
 
-# RequestVote RPC
+## RequestVote RPC
 
 The request contains:
 
@@ -271,9 +272,7 @@ I want the same RPC to work with:
 
 The message and the transport are two different things.
 
----
-
-# Replication
+## Replication
 
 After becoming leader, the server starts replicating its log to followers.
 
@@ -326,17 +325,15 @@ next_index  = 6
 If replication fails, `next_index` moves backwards and the leader retries
 with an earlier part of the log.
 
----
-
-# Why `match_index` must not go backwards
+## Why `match_index` must not go backwards
 
 This is one of the first places where thinking about the network matters.
 
 Imagine two replication requests:
 
 ```text
-request A → index 7
-request B → index 5
+request A -> index 7
+request B -> index 5
 ```
 
 The responses can arrive in the opposite order.
@@ -362,9 +359,7 @@ match_index = max(
 This looks like a small detail, but it becomes important once the network
 simulator starts deliberately reordering messages.
 
----
-
-# AppendEntries
+## AppendEntries
 
 The leader uses `AppendEntries` to replicate entries to followers.
 
@@ -425,9 +420,7 @@ See the
 [AppendEntries RPC](https://github.com/souraavv/whitepapers-and-books/blob/main/whitepapers/raft.md#appendentries-rpc)
 section in the notes.
 
----
-
-# Replication is not commitment
+## Replication is not commitment
 
 This distinction is important.
 
@@ -469,367 +462,13 @@ flowchart LR
 These are different pieces of state and are kept separate in the
 implementation.
 
----
-
-# Commit index
+## Commit index
 
 The current commit calculation looks for the highest index that:
 
 1. has been replicated on a majority of servers
 2. belongs to the leader's current term
 3. is ahead of the current `commit_index`
-
-For example:
-
-```text
-match indexes:
-
-S1 → 7
-S2 → 7
-S3 → 6
-S4 → 5
-S5 → 4
-```
-
-If index 6 belongs to the current term, then:
-
-```text
-S1 → 6 ✓
-S2 → 6 ✓
-S3 → 6 ✓
-```
-
-Three servers have it.
-
-So:
-
-```text
-commit_index = 6
-```
-
-The important part is that the leader does not simply say:
-
-> "Most servers have this entry, therefore commit it."
-
-The current-term rule matters too.
-
----
-
-# Why commitment is separate from replication
-
-It would be tempting to put commit logic directly inside the replication
-code.
-
-I'm deliberately not doing that.
-
-Replication answers one question:
-
-```text
-Did the follower replicate the entry?
-```
-
-Commitment answers another:
-
-```text
-Is this entry now committed?
-```
-
-Keeping those decisions separate makes the code easier to reason about and
-makes each rule independently testable.
-
----
-
-# State machine
-
-The log is not the state machine.
-
-The log contains commands:
-
-```text
-SET x=10
-SET x=20
-SET y=30
-```
-
-The state machine applies committed commands:
-
-```text
-x = 20
-y = 30
-```
-
-The intended flow is:
-
-```mermaid
-flowchart LR
-    Client --> Leader
-    Leader --> Log
-    Log --> Replication
-    Replication --> Commit
-    Commit --> StateMachine
-```
-
-A command should only reach the state machine after the corresponding log
-entry is committed.
-
-This part will be implemented separately from the log itself.
-
----
-
-# Why the implementation is split this way
-
-The main design decision is to keep the protocol independent from its
-environment.
-
-For example, election logic should not need to know how a timer is
-implemented.
-
-Replication should not need to know whether an RPC went through TCP.
-
-Commit calculation should not need to know how the log is stored on disk.
-
-Instead:
-
-```text
-Raft logic
-    |
-    +-- storage
-    |
-    +-- transport
-    |
-    +-- timer
-    |
-    +-- state machine
-```
-
-can be connected later.
-
-This is especially useful for testing.
-
----
-
-# Testing
-
-The first tests are deliberately small.
-
-For example:
-
-```text
-Term
-    ↓
-does the term increase correctly?
-
-Log
-    ↓
-does append return the correct index?
-
-Election
-    ↓
-does a duplicate vote count twice?
-
-Replication
-    ↓
-can match_index move backwards?
-
-Commit
-    ↓
-does a majority actually commit an entry?
-```
-
-These tests don't try to simulate a complete cluster yet.
-
-That comes later.
-
-The reason is simple: when a small rule is wrong, I want the test to tell
-me exactly which rule is wrong.
-
----
-
-# The real tests come later
-
-The more interesting part of this project will be the deterministic
-cluster tests.
-
-Eventually I want to be able to create scenarios such as:
-
-```text
-leader
-  |
-  +---- message dropped
-  |
-  +---- message delayed
-  |
-  +---- follower crashes
-  |
-  +---- network partition
-  |
-  +---- follower restarts
-```
-
-and then verify the Raft invariants.
-
-The network should be something the test can control.
-
-For example:
-
-```text
-send(message)
-      |
-      +---- deliver immediately
-      |
-      +---- delay
-      |
-      +---- drop
-      |
-      +---- duplicate
-      |
-      +---- reorder
-```
-
-That is one of the main reasons the transport layer is not mixed into the
-Raft protocol.
-
----
-
-# Deterministic failures
-
-I don't want tests that fail once every few hundred runs because of timing.
-
-A future test should be able to say:
-
-```text
-seed = 12345
-
-start cluster
-
-elect leader
-
-partition node 3
-
-drop message 17
-
-delay message 21
-
-crash node 4
-
-restart node 4
-
-heal partition
-
-deliver delayed messages
-
-verify invariants
-```
-
-If the test fails, the same seed and sequence should reproduce the failure.
-
-This should make debugging distributed behavior much less painful.
-
----
-
-# Logging
-
-Logging is part of the implementation rather than something added at the
-end.
-
-The project uses `tracing`.
-
-The levels have roughly this meaning:
-
-```text
-ERROR  something is broken
-WARN   something unexpected happened
-INFO   important protocol event
-DEBUG  useful implementation details
-TRACE  very detailed execution
-```
-
-For example:
-
-```rust
-tracing::info!(
-    old_commit_index = current_commit.value(),
-    new_commit_index = candidate.value(),
-    term = current_term.value(),
-    "Commit index advanced"
-);
-```
-
-The message is readable, while the fields remain structured.
-
-This should become particularly useful once several nodes are running at
-the same time.
-
----
-
-# A few design rules
-
-There are a few rules I'm trying to keep throughout the implementation.
-
-## Keep protocol rules small
-
-If a function can answer one Raft question, let it answer that one question.
-
-For example:
-
-```text
-is_log_up_to_date()
-```
-
-should answer whether a candidate's log is sufficiently up-to-date.
-
-It shouldn't also start an election, send an RPC and modify the node.
-
----
-
-## Don't optimize before there is a reason
-
-Some structures are intentionally simple right now.
-
-For example, follower replication state currently uses a `Vec`.
-
-A `HashMap` or another structure might eventually make sense for a very
-large cluster.
-
-But correctness comes first.
-
-```text
-correctness
-    ↓
-tests
-    ↓
-measure
-    ↓
-optimize
-```
-
----
-
-## Keep infrastructure out of the protocol
-
-No sockets inside election logic.
-
-No file operations inside replication logic.
-
-No `sleep()` inside Raft state transitions.
-
-No real network required to test a Raft rule.
-
-This makes the code easier to understand and gives the test simulator
-control over the environment.
-
----
-
-## Make failure normal
-
-A distributed system has to assume that things fail.
-
-A dropped message isn't an exceptional situation that the test suite should
-avoid.
-
-It is exactly the kind of situation the implementation needs to handle.
-
----
 
 # References
 
