@@ -390,3 +390,43 @@ fn failed_append_entries_response_backs_up_next_index() {
         Some(LogIndex::ZERO)
     );
 }
+
+#[test]
+fn replication_returns_match_indexes_for_all_followers() {
+    let followers = vec![
+        ServerId::new(2),
+        ServerId::new(3),
+        ServerId::new(4),
+    ];
+
+    let mut replication = ReplicationState::new(
+        &followers,
+        LogIndex::new(5),
+    );
+
+    replication.record_success(
+        ServerId::new(2),
+        LogIndex::new(3),
+    );
+
+    replication.record_success(
+        ServerId::new(3),
+        LogIndex::new(5),
+    );
+
+    replication.record_success(
+        ServerId::new(4),
+        LogIndex::new(2),
+    );
+
+    let match_indexes = replication.match_indexes();
+
+    assert_eq!(
+        match_indexes,
+        vec![
+            LogIndex::new(3),
+            LogIndex::new(5),
+            LogIndex::new(2),
+        ]
+    );
+}

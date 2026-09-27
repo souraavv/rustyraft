@@ -2,10 +2,7 @@
   <img src="./misc/image.png" alt="Rusty Raft" width="400">
 </p>
 
-- [RustyRaft](#rustyraft)
-- [References](#references)
-
-## RustyRaft
+### RustyRaft
 
 Rust implementation of the Raft consensus algorithm.
 
@@ -29,7 +26,7 @@ Keep the Raft protocol separate from networking, storage and timing.
 
 This makes the core logic easier to understand and, easier to test.
 
-## References
+### References
 
 The main reference for the implementation is the Raft paper.
 

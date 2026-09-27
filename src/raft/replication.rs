@@ -254,6 +254,17 @@ impl ReplicationState {
             .map(|progress| progress.match_index)
     }
 
+    /// Returns the replication position of every follower.
+    ///
+    /// The leader uses these positions to determine whether a log entry
+    /// has been replicated on a majority of the cluster.
+    pub fn match_indexes(&self) -> Vec<LogIndex> {
+        self.progress
+            .iter()
+            .map(|(_, progress)| progress.match_index)
+            .collect()
+    }
+
     /// Returns the next index that should be sent to the specified
     /// follower.
     pub fn next_index(
