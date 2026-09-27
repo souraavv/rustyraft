@@ -6,6 +6,7 @@ pub mod node;
 pub mod replication;
 pub mod rpc;
 pub mod state;
+pub mod commit;
 
 pub use log::{LogEntry, RaftLog};
 pub use node::RaftNode;
