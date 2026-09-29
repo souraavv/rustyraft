@@ -1561,3 +1561,143 @@ impl StateMachine<String> for RecordingStateMachine {
         Ok(())
     }
 }
+
+struct FailingStateMachine {
+    applied: Vec<String>,
+}
+
+impl FailingStateMachine {
+    fn new() -> Self {
+        Self {
+            applied: Vec::new(),
+        }
+    }
+}
+
+impl StateMachine<String> for FailingStateMachine {
+    type Error = &'static str;
+
+    fn apply(
+        &mut self,
+        command: &String,
+    ) -> Result<(), Self::Error> {
+        self.applied.push(command.clone());
+
+        if command == "B" {
+            return Err("failed to apply B");
+        }
+
+        Ok(())
+    }
+}
+
+
+#[test]
+fn last_applied_does_not_advance_when_application_fails() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let state_machine = FailingStateMachine::new();
+
+    let mut leader = RaftNode::with_state_machine(
+        leader_id,
+        state_machine,
+    );
+
+    let mut follower = RaftNode::<String>::new(follower_id);
+
+    // Elect the leader.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // Add two commands to the leader's log.
+    leader.append_entry("A".to_string());
+    leader.append_entry("B".to_string());
+
+    // Replicate entry A.
+    let request = leader
+        .build_append_entries(follower_id)
+        .expect(
+            "leader should build AppendEntries",
+        );
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    leader.handle_append_entries_response(
+        follower_id,
+        response,
+        LogIndex::new(1),
+    );
+
+    // Replicate entry B.
+    let request = leader
+        .build_append_entries(follower_id)
+        .expect(
+            "leader should build AppendEntries",
+        );
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    leader.handle_append_entries_response(
+        follower_id,
+        response,
+        LogIndex::new(2),
+    );
+
+    // Both entries are now replicated on a majority.
+    //
+    // The leader automatically updates the commit index and
+    // applies committed entries when processing the response.
+    //
+    // Entry A succeeds.
+    // Entry B fails.
+    //
+    // Therefore:
+    //
+    // commit_index = 2
+    // last_applied = 1
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        leader.last_applied(),
+        LogIndex::new(1)
+    );
+
+    // Entry B failed during the automatic application above.
+    //
+    // Applying again should retry B and fail again.
+    let result = leader.apply_committed_entries();
+
+    assert_eq!(
+        result,
+        Err("failed to apply B")
+    );
+
+    // last_applied must not advance past A.
+    assert_eq!(
+        leader.last_applied(),
+        LogIndex::new(1)
+    );
+}

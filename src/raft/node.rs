@@ -5,8 +5,6 @@
 //! by design we kept the network connections, timers, or durable storage
 //! outside the node
 
-use std::collections::btree_map::Entry;
-
 use crate::raft::{LogEntry, state_machine};
 use crate::raft::Role::{Follower};
 use crate::raft::commit::find_commit_index;
@@ -118,6 +116,12 @@ impl<C> RaftNode<C, NoopStateMachine> {
             state_machine: NoopStateMachine,
         }
     }
+}
+
+impl<C, S> RaftNode<C, S>
+where 
+    S: StateMachine<C>,
+{
 
     // -----------------------------------------------
     // -------------------- Voting -------------------
@@ -560,6 +564,13 @@ impl<C> RaftNode<C, NoopStateMachine> {
             self.volatile.commit_index = new_commit_index;
         }
 
+        if let Err(_) = self.apply_committed_entries() {
+            tracing::error!(
+                server_id = self.id.value(),
+                "Failed to apply committed entries"
+            );
+        }
+
         tracing::debug!(
             server_id = self.id.value(),
             leader_id = request.leader_id.value(),
@@ -653,12 +664,24 @@ impl<C> RaftNode<C, NoopStateMachine> {
                 return;
             }
         };
-
+        
+        // handle success or failure
         leader.replication.handle_response(
             follower_id,
             &response,
             replicated_index,
         );
+
+        // update follower match_index
+        self.update_commit_index();
+
+        // apply_commited_entries()
+        if let Err(_) = self.apply_committed_entries() {
+            tracing::error!(
+                server_id = self.id.value(),
+                "Failed to apply committed entries"
+            );
+        }
 
     }
 
@@ -845,7 +868,7 @@ where
     ///
     /// Entries are applied strictly in log order. The apply index is
     /// advanced only after the state machine successfully applies an entry.
-    pub fn apply_commited_entries(
+    pub fn apply_committed_entries(
         &mut self,
     ) -> Result<(), S::Error> {
 
