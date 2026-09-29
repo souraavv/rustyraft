@@ -7,6 +7,7 @@
 
 use crate::raft::LogEntry;
 use crate::raft::Role::{Follower};
+use crate::raft::commit::find_commit_index;
 use crate::raft::log::RaftLog;
 
 use crate::raft::election::{
@@ -695,6 +696,61 @@ impl<C> RaftNode<C> {
         self.role = Role::Follower;
         self.leader = None;
         self.election = None;
+    }
+
+    /// Update the commit index
+    /// Leader will get the commit index it maintains for the replicas
+    /// or followers and will also append its commit index which is always 
+    /// the last one (new one) 
+    pub fn update_commit_index(&mut self) {
+        // Late coming packets - fault tolerant if condition - so that
+        // we don't break the safety of Raft 
+        if self.role != Role::Leader {
+            tracing::debug!(
+                server_id = self.id.value(),
+                role = ?self.role,
+                "Ignoring commit update because node is not leader"
+            );
+            return;
+        }
+
+        let mut match_indexes = {
+            let leader = match self.leader.as_ref() {
+                Some(leader) => leader,
+                None => {
+                    tracing::warn!(
+                        server_id = self.id.value(),
+                        "Leader state missing while updating commit index"
+                    );
+                    return;
+                }
+            };
+            leader.replication.match_indexes()
+        };
+
+        // Leader should also consider his own counts towards the majority
+        match_indexes.push(self.persistent.log.last_index());
+        
+        let new_commit_index = find_commit_index(
+            self.volatile.commit_index,
+            self.persistent.current_term,
+            &match_indexes,
+            |index| self.persistent.log.term_at(index),
+        );
+
+        // there is a chance to persist
+        if new_commit_index > self.volatile.commit_index {
+            tracing::info!(
+                server_id = self.id.value(),
+                old_commit_index =
+                    self.volatile.commit_index.value(),
+                new_commit_index =
+                    new_commit_index.value(),
+                "Advanced commit index"
+            );
+            
+            self.volatile.commit_index = new_commit_index;
+        }
     }
 
     pub fn follower_progress(

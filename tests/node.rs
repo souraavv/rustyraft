@@ -1134,3 +1134,403 @@ fn leader_retries_append_entries_after_failure() {
         Some(Term::new(1))
     );
 }
+
+
+#[test]
+fn leader_advances_commit_index_after_majority_replication() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut follower = RaftNode::<String>::new(follower_id);
+
+    // Elect the leader.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(Term::new(1)),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(leader.role(), Role::Leader);
+
+    // The leader creates an entry in its current term.
+    let index = leader
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    assert_eq!(
+        index,
+        LogIndex::new(1)
+    );
+
+    // Replicate the entry to the follower.
+    let request = leader
+        .build_append_entries(follower_id)
+        .expect("leader should build AppendEntries");
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    // Tell the leader that the follower successfully replicated
+    // index 1.
+    leader.handle_append_entries_response(
+        follower_id,
+        response,
+        LogIndex::new(1),
+    );
+
+    // Leader + follower = 2/2, which is a majority.
+    leader.update_commit_index();
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::new(1)
+    );
+}
+
+#[test]
+fn leader_does_not_advance_commit_index_without_majority() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut leader = RaftNode::<String>::new(leader_id);
+
+    // Elect the leader. Give it one vote from each follower so that
+    // the election is complete.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_a,
+        RequestVoteResponse::granted(Term::new(1)),
+        &[leader_id, follower_a, follower_b],
+    );
+
+    assert_eq!(leader.role(), Role::Leader);
+
+    // Append an entry in the leader's current term.
+    leader.append_entry("A".to_string());
+
+    // The leader itself has the entry, but neither follower has it.
+    leader.update_commit_index();
+
+    // 1/3 is not a majority.
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::ZERO
+    );
+}
+
+#[test]
+fn leader_commits_entry_after_replicating_to_follower() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut follower = RaftNode::<String>::new(follower_id);
+
+    // Elect the leader.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(Term::new(1)),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(leader.role(), Role::Leader);
+
+    // Append a command to the leader.
+    leader.append_entry("A".to_string());
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::ZERO
+    );
+
+    // Send the entry to the follower.
+    let request = leader
+        .build_append_entries(follower_id)
+        .expect("leader should build AppendEntries");
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    // Tell the leader that index 1 was replicated.
+    leader.handle_append_entries_response(
+        follower_id,
+        response,
+        LogIndex::new(1),
+    );
+
+    // Replication is now on a majority:
+    //
+    // leader   -> 1
+    // follower -> 1
+    //
+    // 2/2 is a majority.
+    leader.update_commit_index();
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::new(1)
+    );
+}
+
+#[test]
+fn follower_advances_commit_index_from_leader_commit() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut follower = RaftNode::<String>::new(follower_id);
+
+    // Elect the leader.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(Term::new(1)),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(leader.role(), Role::Leader);
+
+    // Leader creates three entries.
+    leader.append_entry("A".to_string());
+    leader.append_entry("B".to_string());
+    leader.append_entry("C".to_string());
+
+    // Send all three entries and tell the follower that index 3
+    // is committed.
+    let mut request = leader
+        .build_append_entries(follower_id)
+        .expect("leader should build AppendEntries");
+
+    request.leader_commit = LogIndex::new(3);
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        follower.log().last_index(),
+        LogIndex::new(3)
+    );
+
+    assert_eq!(
+        follower.commit_index(),
+        LogIndex::new(3)
+    );
+}
+
+#[test]
+fn follower_does_not_commit_past_local_log() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut follower = RaftNode::<String>::new(follower_id);
+
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(Term::new(1)),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(leader.role(), Role::Leader);
+
+    leader.append_entry("A".to_string());
+    leader.append_entry("B".to_string());
+    leader.append_entry("C".to_string());
+
+    let mut request = leader
+        .build_append_entries(follower_id)
+        .expect("leader should build AppendEntries");
+
+    request.entries.truncate(2);
+    request.leader_commit = LogIndex::new(3);
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        follower.log().last_index(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        follower.commit_index(),
+        LogIndex::new(2)
+    );
+}
+#[test]
+fn follower_commit_index_never_moves_backward() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut follower = RaftNode::<String>::new(follower_id);
+
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(Term::new(1)),
+        &[leader_id, follower_id],
+    );
+
+    leader.append_entry("A".to_string());
+    leader.append_entry("B".to_string());
+    leader.append_entry("C".to_string());
+
+    let mut request = leader
+        .build_append_entries(follower_id)
+        .expect("leader should build AppendEntries");
+
+    request.leader_commit = LogIndex::new(3);
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+    assert_eq!(
+        follower.commit_index(),
+        LogIndex::new(3)
+    );
+
+    // A later RPC must not move commit_index backwards.
+    let mut request = leader
+        .build_append_entries(follower_id)
+        .expect("leader should build AppendEntries");
+
+    request.leader_commit = LogIndex::new(1);
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        follower.commit_index(),
+        LogIndex::new(3)
+    );
+}
+
+#[test]
+fn leader_commit_index_never_moves_backward() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader = RaftNode::<String>::new(leader_id);
+
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(Term::new(1)),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(leader.role(), Role::Leader);
+
+    leader.append_entry("A".to_string());
+
+    leader.handle_append_entries_response(
+        follower_id,
+        AppendEntriesResponse::success(Term::new(1)),
+        LogIndex::new(1),
+    );
+
+    leader.update_commit_index();
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::new(1)
+    );
+
+    // Recalculating cannot reduce the commit index.
+    leader.update_commit_index();
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::new(1)
+    );
+}
+
+#[test]
+fn leader_does_not_commit_older_term_entry_directly() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut leader = RaftNode::<String>::new(leader_id);
+
+    // Term 1.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_a,
+        RequestVoteResponse::granted(Term::new(1)),
+        &[leader_id, follower_a, follower_b],
+    );
+
+    assert_eq!(leader.role(), Role::Leader);
+
+    leader.append_entry("A".to_string());
+
+    // Do not replicate it yet.
+    //
+    // The entry is from the current term, so this setup alone
+    // does not prove the older-term rule. We need a new term.
+    //
+    // Step down because of a newer term.
+    leader.handle_append_entries(
+        AppendEntriesRequest::heartbeat(
+            Term::new(2),
+            follower_a,
+            LogIndex::new(0),
+            Term::ZERO,
+            LogIndex::ZERO,
+        )
+    );
+
+    assert_eq!(leader.role(), Role::Follower);
+
+    // Start a new election in term 3.
+    leader.start_election();
+
+    assert_eq!(
+        leader.current_term(),
+        Term::new(3)
+    );
+
+    // The old entry is still at index 1 and belongs to term 1.
+    //
+    // Become leader again.
+    leader.handle_request_vote_response(
+        follower_a,
+        RequestVoteResponse::granted(Term::new(3)),
+        &[leader_id, follower_a, follower_b],
+    );
+
+    assert_eq!(leader.role(), Role::Leader);
+
+    leader.update_commit_index();
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::ZERO
+    );
+}
