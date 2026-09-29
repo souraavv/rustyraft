@@ -13,6 +13,8 @@ use rustyraft::raft::rpc::{
     AppendEntriesResponse,
 };
 
+use rustyraft::raft::state_machine::StateMachine;
+
 #[test]
 fn request_vote_rejects_older_term() {
     let mut node = RaftNode::<String>::new(
@@ -1533,4 +1535,29 @@ fn leader_does_not_commit_older_term_entry_directly() {
         leader.commit_index(),
         LogIndex::ZERO
     );
+}
+
+
+struct RecordingStateMachine {
+    applied: Vec<String>,
+}
+
+impl RecordingStateMachine {
+    fn new() -> Self {
+        Self {
+            applied: Vec::new(),
+        }
+    }
+}
+
+impl StateMachine<String> for RecordingStateMachine {
+    type Error = ();
+
+    fn apply(
+        &mut self,
+        command: &String,
+    ) -> Result<(), Self::Error> {
+        self.applied.push(command.clone());
+        Ok(())
+    }
 }

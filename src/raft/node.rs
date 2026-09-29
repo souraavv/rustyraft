@@ -5,7 +5,9 @@
 //! by design we kept the network connections, timers, or durable storage
 //! outside the node
 
-use crate::raft::LogEntry;
+use std::collections::btree_map::Entry;
+
+use crate::raft::{LogEntry, state_machine};
 use crate::raft::Role::{Follower};
 use crate::raft::commit::find_commit_index;
 use crate::raft::log::RaftLog;
@@ -33,6 +35,11 @@ use crate::raft::state::{
     VolatileState
 };
 
+use crate::raft::state_machine::{
+    NoopStateMachine,
+    StateMachine,
+};
+
 /// A single Raft server.
 ///
 /// The node contains the state required to participate in the Raft protocol
@@ -51,7 +58,10 @@ use crate::raft::state::{
 /// We will keep this generic so that we don't care log data type (C)
 /// 
 #[derive(Debug)]
-pub struct RaftNode<C> {
+pub struct RaftNode<
+    C,
+    S = NoopStateMachine,
+> {
     // My identity - id and role
     id: ServerId,
     role: Role,
@@ -71,9 +81,12 @@ pub struct RaftNode<C> {
     // the progress of each replica (next_index, match_index) useful to 
     // sync there log entires with me during append entries RPC
     leader: Option<LeaderState>,
+
+    // The state machine receives committed commands in log order.
+    state_machine: S,
 }
 
-impl<C> RaftNode<C> {
+impl<C> RaftNode<C, NoopStateMachine> {
 
     /// Create a new Raft Server
     ///
@@ -102,6 +115,7 @@ impl<C> RaftNode<C> {
 
             leader: None,
             election: None,
+            state_machine: NoopStateMachine,
         }
     }
 
@@ -794,4 +808,81 @@ impl<C> RaftNode<C> {
     pub fn election(&self) -> Option<&ElectionState> {
         self.election.as_ref()
     }
+}
+
+
+impl<C, S> RaftNode<C, S>
+where 
+    S: StateMachine<C>,
+{
+    pub fn with_state_machine(
+        id: ServerId,
+        state_machine: S,
+    ) -> Self {
+        Self {
+            id,
+            role: Role::Follower,
+
+            persistent: PersistentState {
+                current_term: Term::ZERO,
+                voted_for: None,
+                log: RaftLog::new(),
+            },
+
+            volatile: VolatileState {
+                commit_index: LogIndex::ZERO,
+                last_apply_index: LogIndex::ZERO,
+            },
+
+            state_machine,
+
+            leader: None,
+            election: None,
+        }
+    }
+
+    /// Applies committed log entries that have not been applied yet.
+    ///
+    /// Entries are applied strictly in log order. The apply index is
+    /// advanced only after the state machine successfully applies an entry.
+    pub fn apply_commited_entries(
+        &mut self,
+    ) -> Result<(), S::Error> {
+
+        while self.volatile.last_apply_index < self.volatile.commit_index {
+            let index = self.volatile.last_apply_index.next();
+
+            let entry = match self.persistent.log.get(index) {
+                Some(entry) => entry,
+                None => {
+                    tracing::error!(
+                        server_id = self.id.value(),
+                        index = index.value(),
+                        commit_index =
+                            self.volatile.commit_index.value(),
+                        "Committed log entry is missing"
+                    );
+                    break;
+                }
+            };
+
+            tracing::debug!(
+                server_id = self.id.value(),
+                log_index = index.value(),
+                "Applying committed log entry"
+            );
+
+            self.state_machine.apply(&entry.command)?;
+
+            self.volatile.last_apply_index = index;
+
+            tracing::debug!(
+                server_id = self.id.value(),
+                last_apply_index = index.value(),
+                "Applied committed log entry"
+            );
+        }
+        Ok(())
+    }
+
 }

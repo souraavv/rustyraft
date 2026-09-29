@@ -16,6 +16,30 @@
 /// The command is borrowed because the command remain part of Raft log after
 /// it is applied
 pub trait StateMachine<C> {
+    // every implementation of this trait must choose what its error type is
+    type Error;
     /// Applies a commited command to the state machine
-    fn apply(&mut self, command: &C);
+    fn apply(
+        &mut self, 
+        command: &C
+    ) -> Result<(), Self::Error>;
 }
+
+/// State machine used when a Raft node does not need to apply
+/// commands yet.
+
+#[derive(Debug, Default)]
+pub struct NoopStateMachine; 
+
+impl<C> StateMachine<C> for NoopStateMachine {
+    type Error = ();
+
+    fn apply(
+        &mut self, 
+        command: &C
+    ) -> Result<(), Self::Error>
+    {
+        Ok(())
+    }
+}
+
