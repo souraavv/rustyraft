@@ -243,32 +243,6 @@ fn start_election_creates_election_state() {
 }
 
 #[test]
-fn starting_another_election_increments_term_again() {
-    let mut node = RaftNode::<String>::new(
-        ServerId::new(1),
-    );
-
-    node.start_election();
-
-    assert_eq!(
-        node.current_term(),
-        Term::new(1),
-    );
-
-    node.start_election();
-
-    assert_eq!(
-        node.current_term(),
-        Term::new(2),
-    );
-
-    assert_eq!(
-        node.role(),
-        Role::Candidate,
-    );
-}
-
-#[test]
 fn candidate_stays_candidate_without_majority() {
     let mut node = RaftNode::<String>::new(
         ServerId::new(1),
@@ -1699,5 +1673,332 @@ fn last_applied_does_not_advance_when_application_fails() {
     assert_eq!(
         leader.last_applied(),
         LogIndex::new(1)
+    );
+}
+
+#[test]
+fn follower_starts_election_when_election_timer_expires() {
+    let server_id = ServerId::new(1);
+
+    let mut node = RaftNode::<String>::new(server_id);
+
+    assert_eq!(
+        node.role(),
+        Role::Follower
+    );
+
+    for _ in 0..5 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+}
+
+#[test]
+fn follower_does_not_start_election_before_timeout() {
+    let server_id = ServerId::new(1);
+
+    let mut node = RaftNode::<String>::new(server_id);
+
+    for _ in 0..4 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Follower
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::ZERO
+    );
+}
+
+#[test]
+fn append_entries_resets_follower_election_timer() {
+    let server_id = ServerId::new(1);
+    let leader_id = ServerId::new(2);
+
+    let mut node = RaftNode::<String>::new(server_id);
+
+    for _ in 0..4 {
+        node.tick();
+    }
+
+    let request = AppendEntriesRequest::heartbeat(
+        Term::ZERO,
+        leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        LogIndex::ZERO,
+    );
+
+    let response = node.handle_append_entries(request);
+
+    assert!(response.success);
+
+    for _ in 0..4 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Follower
+    );
+}
+
+#[test]
+fn candidate_starts_another_election_after_timeout() {
+    let server_id = ServerId::new(1);
+
+    let mut node = RaftNode::<String>::new(server_id);
+
+    // First timeout starts the first election.
+    for _ in 0..5 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+
+    // The candidate does not receive enough votes.
+    // Its election timer eventually expires again.
+
+    for _ in 0..5 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(2)
+    );
+}
+
+#[test]
+fn starting_another_election_increments_term_again() {
+    let server_id = ServerId::new(1);
+
+    let mut node = RaftNode::<String>::new(server_id);
+
+    for expected_term in 1..=3 {
+        for _ in 0..5 {
+            node.tick();
+        }
+
+        assert_eq!(
+            node.role(),
+            Role::Candidate
+        );
+
+        assert_eq!(
+            node.current_term(),
+            Term::new(expected_term)
+        );
+    }
+}
+
+#[test]
+fn candidate_does_not_start_another_election_before_timeout() {
+    let server_id = ServerId::new(1);
+
+    let mut node = RaftNode::<String>::new(server_id);
+
+    // First election.
+    for _ in 0..5 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+
+    // Only four ticks into the next election.
+    for _ in 0..4 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+}
+
+
+#[test]
+fn candidate_steps_down_when_valid_append_entries_arrives() {
+    let server_id = ServerId::new(1);
+    let leader_id = ServerId::new(2);
+
+    let mut node = RaftNode::<String>::new(server_id);
+
+    // Become candidate.
+    for _ in 0..5 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+
+    let request = AppendEntriesRequest::heartbeat(
+        Term::new(1),
+        leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        LogIndex::ZERO,
+    );
+
+    let response =
+        node.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        node.role(),
+        Role::Follower
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+}
+
+
+#[test]
+fn leader_does_not_generate_heartbeat_before_interval() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    for _ in 0..4 {
+        leader.tick();
+    }
+
+    let requests =
+        leader.heartbeat_requests();
+
+    assert!(requests.is_empty());
+}
+
+#[test]
+fn leader_generates_heartbeat_for_each_follower() {
+    let leader_id = ServerId::new(1);
+
+    let followers = [
+        ServerId::new(2),
+        ServerId::new(3),
+        ServerId::new(4),
+    ];
+
+    let cluster = [
+        leader_id,
+        followers[0],
+        followers[1],
+        followers[2],
+    ];
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    leader.start_election();
+
+    // The leader already voted for itself.
+    //
+    // Two additional votes give the candidate a
+    // majority in a four-node cluster.
+    leader.handle_request_vote_response(
+        followers[0],
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &cluster,
+    );
+
+    leader.handle_request_vote_response(
+        followers[1],
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &cluster,
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // The heartbeat interval is five ticks.
+    for _ in 0..5 {
+        leader.tick();
+    }
+
+    let requests =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        requests.len(),
+        3
+    );
+
+    assert!(
+        requests
+            .iter()
+            .all(|(_, request)| request.entries.is_empty())
     );
 }

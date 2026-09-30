@@ -274,4 +274,16 @@ impl ReplicationState {
         self.progress(server_id)
             .map(|progress| progress.next_index)
     }
+
+    // '_ means anonymous lifetime - the returned iterator may borrow 
+    // somethign, and that borrow lasts for at least as long as the 
+    // lifetime of &self borrow - basically iterator should not outlive
+    // ReplicationState borrow
+    pub fn follower_ids(
+        &self,
+    ) -> impl Iterator<Item = ServerId> + '_ {
+        self.progress
+            .iter()
+            .map(|(server_id, _)| *server_id)
+    }
 }

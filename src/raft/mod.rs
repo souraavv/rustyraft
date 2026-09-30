@@ -12,3 +12,4 @@ pub mod state_machine;
 pub use log::{LogEntry, RaftLog};
 pub use node::RaftNode;
 pub use state::{LogIndex, Role, ServerId, Term};
+pub use election::{ElectionTimer, HeartbeatTimer};

@@ -4,9 +4,7 @@ use rustyraft::raft::election::{
 };
 
 use rustyraft::raft::{
-    LogIndex,
-    ServerId,
-    Term,
+    ElectionTimer, LogIndex, ServerId, Term, HeartbeatTimer,
 };
 
 #[test]
@@ -126,4 +124,115 @@ fn identical_logs_are_equally_up_to_date() {
         LogIndex::new(10),
         Term::new(3),
     ));
+}
+
+#[test]
+fn election_timer_does_not_expire_before_timeout() {
+    let mut timer = ElectionTimer::new(3);
+
+    timer.tick();
+    timer.tick();
+
+    assert!(!timer.expired());
+    assert_eq!(timer.elapsed_ticks(), 2);
+}
+
+#[test]
+fn election_timer_expires_at_timeout() {
+    let mut timer = ElectionTimer::new(3);
+
+    timer.tick();
+    timer.tick();
+    timer.tick();
+
+    assert!(timer.expired());
+    assert_eq!(timer.elapsed_ticks(), 3);
+}
+
+#[test]
+fn election_timer_can_be_reset() {
+    let mut timer = ElectionTimer::new(3);
+
+    timer.tick();
+    timer.tick();
+
+    timer.reset();
+
+    assert!(!timer.expired());
+    assert_eq!(timer.elapsed_ticks(), 0);
+}
+
+#[test]
+fn election_timer_remains_expired_after_timeout() {
+    let mut timer = ElectionTimer::new(2);
+
+    timer.tick();
+    timer.tick();
+    timer.tick();
+
+    assert!(timer.expired());
+    assert_eq!(timer.elapsed_ticks(), 3);
+}
+
+#[test]
+#[should_panic(expected = "Election timeout must be greater than zero")]
+fn election_timer_rejects_zero_timeout() {
+    ElectionTimer::new(0);
+}
+
+
+#[test]
+fn heartbeat_timer_does_not_expire_before_interval() {
+    let mut timer = HeartbeatTimer::new(3);
+
+    timer.tick();
+    timer.tick();
+
+    assert!(!timer.expired());
+    assert_eq!(timer.elapsed_ticks(), 2);
+}
+
+#[test]
+fn heartbeat_timer_expires_at_interval() {
+    let mut timer = HeartbeatTimer::new(3);
+
+    timer.tick();
+    timer.tick();
+    timer.tick();
+
+    assert!(timer.expired());
+    assert_eq!(timer.elapsed_ticks(), 3);
+}
+
+#[test]
+fn heartbeat_timer_can_be_reset() {
+    let mut timer = HeartbeatTimer::new(3);
+
+    timer.tick();
+    timer.tick();
+
+    timer.reset();
+
+    assert!(!timer.expired());
+    assert_eq!(timer.elapsed_ticks(), 0);
+}
+
+#[test]
+fn heartbeat_timer_remains_expired_after_interval() {
+    let mut timer = HeartbeatTimer::new(2);
+
+    timer.tick();
+    timer.tick();
+    timer.tick();
+
+    assert!(timer.expired());
+    assert_eq!(timer.elapsed_ticks(), 3);
+}
+
+#[test]
+#[should_panic(
+    expected = "Heartbeat interval must be greater than zero"
+)]
+fn heartbeat_timer_rejects_zero_interval() {
+    HeartbeatTimer::new(0);
 }

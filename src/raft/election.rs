@@ -207,3 +207,109 @@ pub fn should_grant_vote(
     true
 }
 
+
+/// Tracks the election timeout using logical ticks
+/// 
+/// The timer is independent of wall-clock time so that 
+/// election behavior can be tested deterministically
+
+#[derive(Debug, Copy, Clone)]
+pub struct ElectionTimer {
+    elapsed_ticks: u64,
+    timeout_ticks: u64,
+}
+
+impl ElectionTimer {
+    pub fn new(timeout_ticks: u64) -> Self {
+        assert!(
+            timeout_ticks > 0,
+            "Election timeout must be greater than zero"
+        );
+
+        Self {
+            elapsed_ticks: 0,
+            timeout_ticks,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.elapsed_ticks = 0;
+
+        tracing::trace!(
+            timeout_ticks = self.timeout_ticks,
+            "Reset election timer"
+        );
+    }
+
+    pub fn tick(&mut self) {
+        self.elapsed_ticks = 
+            self.elapsed_ticks.saturating_add(1);
+        
+        tracing::trace!(
+            elapsed_ticks = self.elapsed_ticks,
+            timeout_ticks = self.timeout_ticks,
+            "Advanced election timer"
+        );
+    }
+
+    pub fn expired(&self) -> bool {
+        self.elapsed_ticks >= self.timeout_ticks
+    }
+
+    // getters
+    pub fn elapsed_ticks(&self) -> u64 {
+        self.elapsed_ticks
+    }
+
+    pub fn timeout_ticks(&self) -> u64 {
+        self.timeout_ticks
+    }
+
+
+}
+
+/// Tracks the leader heartbeat interval using logical ticks
+/// 
+/// The timer is kept independent of wall-clock time so that heartbeat 
+/// behavior can be tested deterministically
+
+#[derive(Debug, Clone, Copy)]
+pub struct HeartbeatTimer {
+    elapsed_ticks: u64, 
+    interval_ticks: u64,
+}
+
+impl HeartbeatTimer {
+    pub fn new(interval_ticks: u64) -> Self {
+        assert!(
+            interval_ticks > 0,
+            "Heartbeat interval must be greater than zero"
+        );
+
+        Self {
+            elapsed_ticks: 0, 
+            interval_ticks,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.elapsed_ticks = 0;
+    }
+
+    pub fn tick(&mut self) {
+        self.elapsed_ticks = self.elapsed_ticks.saturating_add(1);
+    }
+
+    pub fn expired(&self) -> bool {
+        self.elapsed_ticks >= self.interval_ticks
+    }
+
+    // getters
+        pub fn elapsed_ticks(&self) -> u64 {
+        self.elapsed_ticks
+    }
+
+    pub fn interval_ticks(&self) -> u64 {
+        self.interval_ticks
+    }
+}

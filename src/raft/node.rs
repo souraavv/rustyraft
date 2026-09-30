@@ -5,7 +5,7 @@
 //! by design we kept the network connections, timers, or durable storage
 //! outside the node
 
-use crate::raft::{LogEntry, state_machine};
+use crate::raft::{HeartbeatTimer, LogEntry, state_machine};
 use crate::raft::Role::{Follower};
 use crate::raft::commit::find_commit_index;
 use crate::raft::log::RaftLog;
@@ -13,6 +13,7 @@ use crate::raft::log::RaftLog;
 use crate::raft::election::{
     should_grant_vote,
     ElectionState,
+    ElectionTimer,
 };
 
 use crate::raft::replication::FollowerProgress;
@@ -73,6 +74,10 @@ pub struct RaftNode<
     // When I start the election I maintain this state - i record for
     // which term i will become the candiate, my Id and whom all voted me..
     election: Option<ElectionState>,
+    election_timer: ElectionTimer,
+
+    // Heart beat timeouts
+    heartbeat_timer: HeartbeatTimer,
     // If I win the election then as a leader 
     // I will maintain a  volatile state 
     // I will use this to remember the replication state which is basically
@@ -84,18 +89,16 @@ pub struct RaftNode<
     state_machine: S,
 }
 
-impl<C> RaftNode<C, NoopStateMachine> {
-
-    /// Create a new Raft Server
-    ///
-    /// A new server starts as followr with term = 0, no vote, an empty log
-    /// commit index = 0, last applied index = 0
-    /// 
-    /// As a new node - I always starts as follower, I'm at 0 in term of
-    /// log, current_term and I've never voted any one
-    /// 
-    /// My volalite state is also at 0
-    pub fn new(id: ServerId) -> Self {
+/// Generic Raft Node with Any type having trait of State machine
+impl<C, S> RaftNode<C, S>
+where 
+    S: StateMachine<C>,
+{
+    // new construction with a state machine
+    pub fn with_state_machine(
+        id: ServerId,
+        state_machine: S,
+    ) -> Self {
         Self {
             id,
             role: Role::Follower,
@@ -107,22 +110,18 @@ impl<C> RaftNode<C, NoopStateMachine> {
             },
 
             volatile: VolatileState {
-                commit_index: crate::raft::state::LogIndex::ZERO,
-                last_apply_index: crate::raft::state::LogIndex::ZERO,
+                commit_index: LogIndex::ZERO,
+                last_apply_index: LogIndex::ZERO,
             },
+
+            state_machine,
 
             leader: None,
             election: None,
-            state_machine: NoopStateMachine,
+            election_timer: ElectionTimer::new(5),
+            heartbeat_timer: HeartbeatTimer::new(5),
         }
     }
-}
-
-impl<C, S> RaftNode<C, S>
-where 
-    S: StateMachine<C>,
-{
-
     // -----------------------------------------------
     // -------------------- Voting -------------------
     // -----------------------------------------------
@@ -370,12 +369,16 @@ where
         &mut self, 
         cluster_servers: &[ServerId],
     ) {
+        // Get all your followers by iterating through the slice of Server Ids
         let followers: Vec<ServerId> = cluster_servers
             .iter()
             .copied()
             .filter(|server_id| *server_id != self.id)
             .collect();
 
+        // Each node has its persistent store, now that will help to 
+        // feed someinfo to the leader's state i.e., last_log_index
+        // 
         let last_log_index = self.persistent.log.last_index();
 
         self.role = Role::Leader;
@@ -411,7 +414,8 @@ where
         &mut self, 
         request: AppendEntriesRequest<C>,
     ) -> AppendEntriesResponse {
-                tracing::debug!(
+        
+        tracing::debug!(
             server_id = self.id.value(),
             leader_id = request.leader_id.value(),
             request_term = request.term.value(),
@@ -470,6 +474,12 @@ where
             self.leader = None;
             self.election = None;
         }
+
+        // kept after the request.term < self.persistent.current_term
+        // because we dont' want stale incoming packets to reset the timer
+        // in nutshell - old leader message should not reset the election
+        // timer
+        self.election_timer.reset();
 
         // The previous log entry is the consistency point between the
         // leader and follower. If it does not exist or has a different
@@ -799,70 +809,6 @@ where
             .progress(follower_id)
     }
 
-    /// ---- Helpers - Getters ----
-    pub fn id(&self) -> ServerId {
-        self.id
-    }
-
-    pub fn role(&self) -> Role {
-        self.role
-    }
-
-    pub fn current_term(&self) -> Term {
-        self.persistent.current_term
-    }
-
-    pub fn voted_for(&self) -> Option<ServerId> {
-        self.persistent.voted_for
-    }
-
-    pub fn log(&self) -> &RaftLog<C> {
-        &self.persistent.log
-    }
-
-    pub fn commit_index(&self) -> crate::raft::state::LogIndex {
-        self.volatile.commit_index
-    }
-
-    pub fn last_applied(&self) -> crate::raft::state::LogIndex {
-        self.volatile.last_apply_index
-    }
-
-    pub fn election(&self) -> Option<&ElectionState> {
-        self.election.as_ref()
-    }
-}
-
-
-impl<C, S> RaftNode<C, S>
-where 
-    S: StateMachine<C>,
-{
-    pub fn with_state_machine(
-        id: ServerId,
-        state_machine: S,
-    ) -> Self {
-        Self {
-            id,
-            role: Role::Follower,
-
-            persistent: PersistentState {
-                current_term: Term::ZERO,
-                voted_for: None,
-                log: RaftLog::new(),
-            },
-
-            volatile: VolatileState {
-                commit_index: LogIndex::ZERO,
-                last_apply_index: LogIndex::ZERO,
-            },
-
-            state_machine,
-
-            leader: None,
-            election: None,
-        }
-    }
 
     /// Applies committed log entries that have not been applied yet.
     ///
@@ -908,4 +854,151 @@ where
         Ok(())
     }
 
+    /// Every election timeout while remaining a candidate starts another
+    /// election, and every new electin has a strictly greater term than
+    /// previous one
+    /// 
+    /// Ticks takes the responsibility to reset the timer and no the election
+    pub fn tick(&mut self) {
+        self.election_timer.tick();
+
+        // If I'm follower or a candidate a expired time leads to an
+        // election
+        if (self.role == Role::Follower || self.role == Role::Candidate) 
+            && self.election_timer.expired() 
+        {
+            tracing::info!(
+                server_id = self.id.value(),
+                term = self.current_term().value(),
+                role = ?self.role,
+                "Election timeout expired"
+            );
+
+            self.start_election();
+            self.election_timer.reset();
+        }
+    }
+
+    /// Heart beat request
+    /// 
+    pub fn heartbeat_requests(
+        &mut self,
+    ) -> Vec<(ServerId, AppendEntriesRequest<C>)> 
+    where 
+        C: Clone, 
+    {
+        if self.role != Role::Leader {
+            return Vec::new();
+        }
+
+        if !self.heartbeat_timer.expired() {
+            return Vec::new();
+        }
+
+        let follower_ids= match self.leader.as_ref() {
+            Some(leader) => leader.replication.follower_ids(),
+            None => {
+                tracing::warn!(
+                    server_id = self.id.value(),
+                    "Leader state missing while building heartbeats"
+                );
+                
+                return Vec::new();
+            }
+        };
+
+        let mut requests = Vec::new();
+        
+        for follower_id in follower_ids {
+            if let Some(request) =
+                self.build_append_entries(follower_id) {
+                requests.push((
+                    follower_id,
+                    request,
+                ));
+            }
+        }
+
+        self.heartbeat_timer.reset();
+
+        tracing::debug!(
+            server_id = self.id.value(),
+            heartbeat_count = requests.len(),
+            "Built leader heartbeat requests"
+        );
+
+        requests
+    } 
+
+    /// ---- Helpers - Getters ----
+    pub fn id(&self) -> ServerId {
+        self.id
+    }
+
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    pub fn current_term(&self) -> Term {
+        self.persistent.current_term
+    }
+
+    pub fn voted_for(&self) -> Option<ServerId> {
+        self.persistent.voted_for
+    }
+
+    pub fn log(&self) -> &RaftLog<C> {
+        &self.persistent.log
+    }
+
+    pub fn commit_index(&self) -> crate::raft::state::LogIndex {
+        self.volatile.commit_index
+    }
+
+    pub fn last_applied(&self) -> crate::raft::state::LogIndex {
+        self.volatile.last_apply_index
+    }
+
+    pub fn election(&self) -> Option<&ElectionState> {
+        self.election.as_ref()
+    }
+
+}
+
+// Simplistic model of state machine where concrete type is fixed 
+// to NoopStateMachine
+impl<C> RaftNode<C, NoopStateMachine> {
+
+    /// Create a new Raft Server
+    ///
+    /// A new server starts as followr with term = 0, no vote, an empty log
+    /// commit index = 0, last applied index = 0
+    /// 
+    /// As a new node - I always starts as follower, I'm at 0 in term of
+    /// log, current_term and I've never voted any one
+    /// 
+    /// My volalite state is also at 0
+    pub fn new(id: ServerId) -> Self {
+        Self {
+            id,
+            role: Role::Follower,
+
+            persistent: PersistentState {
+                current_term: Term::ZERO,
+                voted_for: None,
+                log: RaftLog::new(),
+            },
+
+            volatile: VolatileState {
+                commit_index: crate::raft::state::LogIndex::ZERO,
+                last_apply_index: crate::raft::state::LogIndex::ZERO,
+            },
+
+            leader: None,
+            election: None,
+            election_timer: ElectionTimer::new(5), 
+            heartbeat_timer: HeartbeatTimer::new(5), 
+            state_machine: NoopStateMachine,
+        }
+    }
 }
