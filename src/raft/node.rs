@@ -860,6 +860,16 @@ where
     /// 
     /// Ticks takes the responsibility to reset the timer and no the election
     pub fn tick(&mut self) {
+        
+        // A leader on tick increment its heartbeat timer.. it doesn't
+        // bother about the election timer.. election are driven by 
+        // follower not recieving hearbeats for a given timeout
+        if self.role == Role::Leader {
+            self.heartbeat_timer.tick();
+            return;
+        }
+
+        // If I'm a follower or Candidate..
         self.election_timer.tick();
 
         // If I'm follower or a candidate a expired time leads to an
