@@ -8,6 +8,8 @@
 
 use std::collections::VecDeque;
 
+use crate::raft::ServerId;
+
 use super::RaftMessage;
 
 #[derive(Debug)]
@@ -49,6 +51,22 @@ impl<C> InMemoryTransport<C> {
         }
         
         message
+    }
+
+    pub fn deliver_to(
+        &mut self,
+        server_id: ServerId,
+    ) -> Option<RaftMessage<C>> {
+        let position = self
+            .messages
+            .iter()
+            .position(|message| message.to == server_id)?;
+
+        tracing::debug!(
+            server_id = server_id.value(),
+            "Delivering message to server"
+        );
+        self.messages.remove(position)
     }
 
     pub fn has_pending(&self) -> bool {

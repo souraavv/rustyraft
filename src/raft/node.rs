@@ -984,6 +984,14 @@ where
         self.election.as_ref()
     }
 
+    pub fn last_log_index(&self) -> crate::raft::state::LogIndex {
+        self.persistent.log.last_index()
+    }
+
+    pub fn last_log_term(&self) -> Term {
+        self.persistent.log.last_term().unwrap_or(Term::ZERO)
+    }
+
 }
 
 // Simplistic model of state machine where concrete type is fixed 

@@ -33,6 +33,7 @@ pub struct RaftLog<C> {
 }
 
 impl<C> RaftLog<C> {
+    
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),

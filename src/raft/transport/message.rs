@@ -4,11 +4,8 @@
 //! The payload contains the Raft RPC itself.
 //! 
 
-use std::marker::PhantomData;
-
 use crate::raft::rpc::{
-    AppendEntriesRequest,
-    RequestVoteRequest,
+    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
 };
 
 use crate::raft::state::ServerId;
@@ -22,8 +19,12 @@ pub struct RaftMessage<C> {
 
 #[derive(Debug)]
 pub enum RaftMessagePayload<C> {
+    // request RPC messages
     RequestVote(RequestVoteRequest),
+    RequestVoteResponse(RequestVoteResponse),
+    // Append entry messages
     AppendEntries(AppendEntriesRequest<C>),
+    AppendEntriesResponse(AppendEntriesResponse),
 }
 
 impl<C> RaftMessage<C> {

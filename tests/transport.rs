@@ -64,7 +64,7 @@ fn message_preserves_sender_and_receiver() {
             );
         }
 
-        RaftMessagePayload::RequestVote(_) => {
+        _ => {
             panic!(
                 "expected AppendEntries message"
             );
@@ -323,7 +323,7 @@ fn transport_delivers_append_entries_to_follower() {
                     )
             }
 
-            RaftMessagePayload::RequestVote(_) => {
+            _ => {
                 panic!(
                     "expected AppendEntries"
                 );
@@ -407,7 +407,7 @@ fn transport_delivers_request_vote_to_follower() {
                     )
             }
 
-            RaftMessagePayload::AppendEntries(_) => {
+            _ => {
                 panic!(
                     "expected RequestVote"
                 );
