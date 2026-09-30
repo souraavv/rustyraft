@@ -9,6 +9,7 @@ use rustyraft::raft::{
 use rustyraft::raft::rpc::{
     AppendEntriesRequest,
     RequestVoteResponse,
+    RequestVoteRequest,
 };
 
 use rustyraft::raft::transport::{
@@ -427,5 +428,76 @@ fn transport_delivers_request_vote_to_follower() {
     assert_eq!(
         candidate.role(),
         Role::Leader
+    );
+}
+
+#[test]
+fn transport_can_drop_message_for_server() {
+    let mut transport =
+        InMemoryTransport::<String>::new();
+
+    let message_one =
+        RaftMessage::new(
+            ServerId::new(1),
+            ServerId::new(2),
+            RaftMessagePayload::<String>::RequestVote(
+                RequestVoteRequest::new(
+                    Term::new(1),
+                    ServerId::new(1),
+                    LogIndex::ZERO,
+                    Term::ZERO,
+                ),
+            ),
+        );
+
+    let message_two =
+        RaftMessage::new(
+            ServerId::new(1),
+            ServerId::new(3),
+            RaftMessagePayload::<String>::RequestVote(
+                RequestVoteRequest::new(
+                    Term::new(1),
+                    ServerId::new(1),
+                    LogIndex::ZERO,
+                    Term::ZERO,
+                ),
+            ),
+        );
+
+    transport.send(message_one);
+    transport.send(message_two);
+
+    assert_eq!(
+        transport.pending_count(),
+        2,
+    );
+
+    assert!(
+        transport.drop_to(
+            ServerId::new(2),
+        )
+    );
+
+    assert_eq!(
+        transport.pending_count(),
+        1,
+    );
+
+    let remaining =
+        transport
+            .deliver_next()
+            .expect(
+                "message to server 3 should remain",
+            );
+
+    assert_eq!(
+        remaining.to,
+        ServerId::new(3),
+    );
+
+    assert!(
+        !transport.drop_to(
+            ServerId::new(99),
+        )
     );
 }

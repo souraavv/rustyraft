@@ -224,88 +224,6 @@ impl <C: Clone> TestCluster<C> {
         })
     }
 
-    pub fn deliver_request_vote_response(
-        &mut self, 
-        candidate_id: ServerId,
-    ) -> bool {
-        let message =
-            match self
-                .transport
-                .deliver_to(candidate_id) 
-        {
-            Some(message) => message, 
-            None => return false,
-        };
-
-        let from  = message.from;
-
-        let response =
-            match message.payload {
-                RaftMessagePayload::RequestVoteResponse(
-                    response,
-                ) => response,
-
-                _ => {
-                    return false;
-                }
-            };
-
-        let cluster_ids: Vec<ServerId> =
-            self.nodes.keys().copied().collect();
-
-        let candidate =
-            self.nodes
-                .get_mut(&candidate_id)
-                .expect(
-                    "candidate should exists"
-                );
-        
-        candidate.handle_request_vote_response(
-            from, 
-            response, 
-            &cluster_ids
-        );
-        
-        true
-    }
-
-    pub fn deliver_append_entries_response(
-        &mut self, 
-        leader_id: ServerId, 
-    ) -> bool {
-
-        let message = match 
-            self
-                .transport
-                .deliver_to(leader_id) 
-        {
-            Some(message) => message,
-            None => return false,
-        };
-
-        let from = message.from; 
-
-        let response = match message.payload {
-            RaftMessagePayload::AppendEntriesResponse(
-                response,
-            ) => response, 
-
-            _ => {
-                return false;
-            }
-        };
-
-        let leader = 
-            self.nodes.get_mut(&leader_id).expect("leader should exists");
-
-        leader.handle_append_entries_response(
-            from, 
-            response,
-        );
-
-        true
-    }
-
     /// From a given leader_id to a given follower_id
     pub fn send_append_entries(
         &mut self,
@@ -343,6 +261,15 @@ impl <C: Clone> TestCluster<C> {
         );
 
         true
+    }
+
+    pub fn drop_to(
+        &mut self,
+        server_id: ServerId,
+    ) -> bool {
+        self.transport.drop_to(
+            server_id,
+        )
     }
 
 }

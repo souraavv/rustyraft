@@ -69,6 +69,42 @@ impl<C> InMemoryTransport<C> {
         self.messages.remove(position)
     }
 
+    /// Drop one pending message for the given server.
+    ///
+    /// The message is removed from the transport and is never
+    /// delivered to the destination.
+    pub fn drop_to(
+        &mut self,
+        server_id: ServerId,
+    ) -> bool {
+        let position = self
+            .messages
+            .iter()
+            .position(|message| {
+                message.to == server_id
+            });
+
+        let position = match position {
+            Some(position) => position,
+            None => return false,
+        };
+
+        let message =
+            self.messages.remove(position);
+
+        if let Some(message) =
+            message.as_ref()
+        {
+            tracing::debug!(
+                from = message.from.value(),
+                to = message.to.value(),
+                "Dropped Raft message"
+            );
+        }
+
+        true
+    }
+
     pub fn has_pending(&self) -> bool {
         !self.messages.is_empty()
     }

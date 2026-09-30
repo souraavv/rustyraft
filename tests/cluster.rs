@@ -168,9 +168,8 @@ fn request_vote_round_trip_reaches_candidate() {
 
     assert!(
         cluster
-            .deliver_request_vote_response(
-                candidate_id,
-            )
+            .deliver_to(candidate_id)
+            .is_some()
     );
 
     assert_eq!(
@@ -331,5 +330,169 @@ fn append_entries_round_trip_uses_transport() {
             .unwrap()
             .last_log_index(),
         LogIndex::new(3),
+    );
+}
+
+#[test]
+fn append_entries_can_be_retried_after_drop() {
+    let leader_id =
+        ServerId::new(1);
+
+    let follower_id =
+        ServerId::new(2);
+
+    let server_ids = [
+        leader_id,
+        follower_id,
+    ];
+
+    let mut cluster =
+        TestCluster::<String>::new(
+            &server_ids,
+        );
+
+    {
+        let leader =
+            cluster
+                .node_mut(leader_id)
+                .unwrap();
+
+        leader.start_election();
+
+        leader.handle_request_vote_response(
+            follower_id,
+            rustyraft::raft::rpc::RequestVoteResponse::granted(
+                Term::new(1),
+            ),
+            &server_ids,
+        );
+
+        assert_eq!(
+            leader.role(),
+            Role::Leader,
+        );
+
+        leader.append_entry(
+            "A".to_string(),
+        );
+
+        leader.append_entry(
+            "B".to_string(),
+        );
+
+        leader.append_entry(
+            "C".to_string(),
+        );
+    }
+
+    // First replication attempt.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_id,
+        )
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    // Drop the AppendEntries message.
+    assert!(
+        cluster.drop_to(
+            follower_id,
+        )
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        0,
+    );
+
+    // The follower never received the dropped message.
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::ZERO,
+    );
+
+    // Retry the replication.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_id,
+        )
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    // Deliver the retry to the follower.
+    assert!(
+        cluster
+            .deliver_to(follower_id)
+            .is_some()
+    );
+
+    // The follower generated a response.
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::new(3),
+    );
+
+    // Deliver the response back to the leader.
+    assert!(
+        cluster
+            .deliver_to(leader_id)
+            .is_some()
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        0,
+    );
+
+    let progress =
+        cluster
+            .node(leader_id)
+            .unwrap()
+            .follower_progress(
+                follower_id,
+            )
+            .expect(
+                "leader should track follower",
+            );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(3),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(4),
     );
 }
