@@ -74,12 +74,42 @@ pub struct PersistentState<L> {
     pub log: L,
 }
 
+impl<L> PersistentState<L> {
+    pub fn new(
+        current_term: Term, 
+        voted_for: Option<ServerId>,
+        log: L,
+    ) -> Self {
+        Self {
+            current_term,
+            voted_for,
+            log,
+        }
+    }
+}
+
 /// Volatile state
 #[derive(Debug)]
 pub struct VolatileState {
     pub commit_index: LogIndex,
     pub last_apply_index: LogIndex,
 }
+
+impl VolatileState {
+    pub fn new() -> Self {
+        Self {
+            commit_index: LogIndex::ZERO, 
+            last_apply_index: LogIndex::ZERO,
+        }
+    }
+}
+
+impl Default for VolatileState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 
 /// Volatile state maintaind when server is the leader
 /// Re-init when server becomes leader

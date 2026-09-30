@@ -1,3 +1,6 @@
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use rustyraft::raft::{
     RaftNode,
     Role,
@@ -13,7 +16,7 @@ use rustyraft::raft::rpc::{
     AppendEntriesResponse,
 };
 
-use rustyraft::raft::state_machine::StateMachine;
+use rustyraft::raft::state_machine::{NoopStateMachine, StateMachine};
 
 #[test]
 fn request_vote_rejects_older_term() {
@@ -156,21 +159,71 @@ fn request_vote_allows_same_candidate_again() {
 
 #[test]
 fn request_vote_rejects_candidate_with_older_log() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = RaftNode::<String>::new(
+        ServerId::new(1)
+    );
 
-    // TODO: Add local log entries once node log mutation is exposed.
+    // Create a local log with two entries.
+    let entries = vec![
+        LogEntry::new(
+            Term::new(1),
+            "A".to_string(),
+        ),
+        LogEntry::new(
+            Term::new(1),
+            "B".to_string(),
+        ),
+    ];
 
-    let request = RequestVoteRequest::new(
+    let append_request = AppendEntriesRequest::new(
         Term::new(1),
         ServerId::new(2),
         LogIndex::ZERO,
         Term::ZERO,
+        entries,
+        LogIndex::ZERO,
     );
 
-    let response = node.handle_request_vote(request);
+    let append_response =
+        node.handle_append_entries(append_request);
 
-    assert!(response.vote_granted);
+    assert!(
+        append_response.success
+    );
+
+    assert_eq!(
+        node.log().last_index(),
+        LogIndex::new(2)
+    );
+
+    // Candidate is in a newer term but has an empty log.
+    let request = RequestVoteRequest::new(
+        Term::new(2),
+        ServerId::new(3),
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    let response =
+        node.handle_request_vote(request);
+
+    assert!(
+        !response.vote_granted
+    );
+
+    // The node must still advance to the candidate's term.
+    assert_eq!(
+        node.current_term(),
+        Term::new(2)
+    );
+
+    // A rejected candidate must not receive our vote.
+    assert_eq!(
+        node.voted_for(),
+        None
+    );
 }
+
 
 #[test]
 fn start_election_increments_term() {
@@ -1511,15 +1564,20 @@ fn leader_does_not_commit_older_term_entry_directly() {
     );
 }
 
-
 struct RecordingStateMachine {
-    applied: Vec<String>,
+    applied: std::rc::Rc<
+        std::cell::RefCell<Vec<String>>
+    >,
 }
 
 impl RecordingStateMachine {
-    fn new() -> Self {
+    fn new(
+        applied: std::rc::Rc<
+            std::cell::RefCell<Vec<String>>
+        >,
+    ) -> Self {
         Self {
-            applied: Vec::new(),
+            applied,
         }
     }
 }
@@ -1531,7 +1589,11 @@ impl StateMachine<String> for RecordingStateMachine {
         &mut self,
         command: &String,
     ) -> Result<(), Self::Error> {
-        self.applied.push(command.clone());
+        self
+            .applied
+            .borrow_mut()
+            .push(command.clone());
+
         Ok(())
     }
 }
@@ -2261,5 +2323,1015 @@ fn leader_generates_heartbeat_again_after_next_interval() {
     assert_eq!(
         second_round.len(),
         1
+    );
+}
+
+#[test]
+fn node_restart_preserves_persistent_state() {
+    let server_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut node = RaftNode::<String>::new(server_id);
+
+    // Start a real election.
+    node.start_election();
+
+    assert_eq!(node.role(), Role::Candidate);
+    assert_eq!(node.current_term(), Term::new(1));
+    assert_eq!(node.voted_for(), Some(server_id));
+
+    // Give the candidate the second vote so it becomes leader.
+    let response =
+        rustyraft::raft::rpc::RequestVoteResponse::granted(
+            Term::new(1),
+        );
+
+    node.handle_request_vote_response(
+        follower_id,
+        response,
+        &[server_id, follower_id],
+    );
+
+    assert_eq!(node.role(), Role::Leader);
+
+    // Now the node is allowed to append client commands.
+    assert_eq!(
+        node.append_entry("A".to_string()),
+        Some(LogIndex::new(1))
+    );
+
+    assert_eq!(
+        node.append_entry("B".to_string()),
+        Some(LogIndex::new(2))
+    );
+
+    // Move the persistent state out of the failed node.
+    let persistent = node.into_persistent_state();
+
+    assert_eq!(
+        persistent.current_term,
+        Term::new(1)
+    );
+
+    assert_eq!(
+        persistent.voted_for,
+        Some(server_id)
+    );
+
+    assert_eq!(
+        persistent.log.last_index(),
+        LogIndex::new(2)
+    );
+
+    // Recreate the node from persisted state.
+    let restarted =
+        RaftNode::from_persistent_state(
+            server_id,
+            persistent,
+            NoopStateMachine,
+        );
+
+    assert_eq!(
+        restarted.current_term(),
+        Term::new(1)
+    );
+
+    assert_eq!(
+        restarted.voted_for(),
+        Some(server_id)
+    );
+
+    assert_eq!(
+        restarted.log().last_index(),
+        LogIndex::new(2)
+    );
+
+    // Volatile/leader state should not survive the restart.
+    assert_eq!(
+        restarted.role(),
+        Role::Follower
+    );
+
+    assert_eq!(
+        restarted.commit_index(),
+        LogIndex::ZERO
+    );
+
+    assert_eq!(
+        restarted.last_applied(),
+        LogIndex::ZERO
+    );
+}
+
+#[test]
+fn follower_restart_continues_log_replication() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    let mut follower =
+        RaftNode::<String>::new(follower_id);
+
+    // Elect the leader.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // Add three commands to the leader's log.
+    leader.append_entry(
+        "A".to_string()
+    );
+
+    leader.append_entry(
+        "B".to_string()
+    );
+
+    leader.append_entry(
+        "C".to_string()
+    );
+
+    // Replicate only the first two entries
+    // before the follower crashes.
+    let request = AppendEntriesRequest::new(
+        Term::new(1),
+        leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        vec![
+            LogEntry::new(
+                Term::new(1),
+                "A".to_string(),
+            ),
+            LogEntry::new(
+                Term::new(1),
+                "B".to_string(),
+            ),
+        ],
+        LogIndex::ZERO,
+    );
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        follower.log().last_index(),
+        LogIndex::new(2)
+    );
+
+    // Tell the leader that entries through index 2
+    // were successfully replicated.
+    leader.handle_append_entries_response(
+        follower_id,
+        response,
+    );
+
+    let progress = leader
+        .follower_progress(follower_id)
+        .expect(
+            "leader should track follower"
+        );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(3)
+    );
+
+    // The follower crashes. Only persistent state survives.
+    let persistent =
+        follower.into_persistent_state();
+
+    assert_eq!(
+        persistent.log.last_index(),
+        LogIndex::new(2)
+    );
+
+    // Restart the follower from persisted state.
+    let mut follower =
+        RaftNode::from_persistent_state(
+            follower_id,
+            persistent,
+            NoopStateMachine,
+        );
+
+    assert_eq!(
+        follower.role(),
+        Role::Follower
+    );
+
+    assert_eq!(
+        follower.log().last_index(),
+        LogIndex::new(2)
+    );
+
+    // The leader should continue from the follower's
+    // recovered log.
+    let request = leader
+        .build_append_entries(follower_id)
+        .expect(
+            "leader should build AppendEntries"
+        );
+
+    assert_eq!(
+        request.prev_log_index,
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        request.prev_log_term,
+        Term::new(1)
+    );
+
+    assert_eq!(
+        request.entries.len(),
+        1
+    );
+
+    assert_eq!(
+        request.entries[0].command,
+        "C"
+    );
+
+    // Deliver the remaining entry to the
+    // restarted follower.
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        response.replicated_index,
+        Some(LogIndex::new(3))
+    );
+
+    assert_eq!(
+        follower.log().last_index(),
+        LogIndex::new(3)
+    );
+}
+
+#[test]
+fn request_vote_grants_candidate_with_newer_log_term() {
+    let mut node =
+        RaftNode::<String>::new(
+            ServerId::new(1)
+        );
+
+    // Local log:
+    //
+    // index:  1   2
+    // term:   1   1
+    //
+    // Candidate log:
+    //
+    // index:  1
+    // term:   2
+    //
+    // Candidate has fewer entries, but its last log term
+    // is newer, so its log is considered more up-to-date.
+    let entries = vec![
+        LogEntry::new(
+            Term::new(1),
+            "A".to_string(),
+        ),
+        LogEntry::new(
+            Term::new(1),
+            "B".to_string(),
+        ),
+    ];
+
+    let append_request =
+        AppendEntriesRequest::new(
+            Term::new(1),
+            ServerId::new(2),
+            LogIndex::ZERO,
+            Term::ZERO,
+            entries,
+            LogIndex::ZERO,
+        );
+
+    let response =
+        node.handle_append_entries(
+            append_request
+        );
+
+    assert!(
+        response.success
+    );
+
+    let request =
+        RequestVoteRequest::new(
+            Term::new(2),
+            ServerId::new(3),
+            LogIndex::new(1),
+            Term::new(2),
+        );
+
+    let response =
+        node.handle_request_vote(request);
+
+    assert!(
+        response.vote_granted
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(2)
+    );
+
+    assert_eq!(
+        node.voted_for(),
+        Some(ServerId::new(3))
+    );
+}
+
+#[test]
+fn request_vote_rejects_candidate_with_shorter_log_same_term() {
+    let mut node =
+        RaftNode::<String>::new(
+            ServerId::new(1)
+        );
+
+    // Local log:
+    //
+    // index:  1   2
+    // term:   1   2
+    //
+    // Candidate log:
+    //
+    // index:  1
+    // term:   2
+    //
+    // The last terms are equal, so log index decides.
+    // Candidate's log is shorter and must be rejected.
+    let entries = vec![
+        LogEntry::new(
+            Term::new(1),
+            "A".to_string(),
+        ),
+        LogEntry::new(
+            Term::new(2),
+            "B".to_string(),
+        ),
+    ];
+
+    let append_request =
+        AppendEntriesRequest::new(
+            Term::new(2),
+            ServerId::new(2),
+            LogIndex::ZERO,
+            Term::ZERO,
+            entries,
+            LogIndex::ZERO,
+        );
+
+    let response =
+        node.handle_append_entries(
+            append_request
+        );
+
+    assert!(
+        response.success
+    );
+
+    let request =
+        RequestVoteRequest::new(
+            Term::new(3),
+            ServerId::new(3),
+            LogIndex::new(1),
+            Term::new(2),
+        );
+
+    let response =
+        node.handle_request_vote(request);
+
+    assert!(
+        !response.vote_granted
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(3)
+    );
+
+    assert_eq!(
+        node.voted_for(),
+        None
+    );
+}
+
+#[test]
+fn leader_retries_and_reconciles_follower_after_failure() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    let mut follower =
+        RaftNode::<String>::new(follower_id);
+
+    // Elect the leader.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &[leader_id, follower_id],
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // Leader log:
+    //
+    // index:  1   2   3
+    // term:   1   1   1
+    leader.append_entry(
+        "A".to_string()
+    );
+
+    leader.append_entry(
+        "B".to_string()
+    );
+
+    leader.append_entry(
+        "C".to_string()
+    );
+
+    // Follower has only entries 1 and 2.
+    let setup_request =
+        AppendEntriesRequest::new(
+            Term::new(1),
+            leader_id,
+            LogIndex::ZERO,
+            Term::ZERO,
+            vec![
+                LogEntry::new(
+                    Term::new(1),
+                    "A".to_string(),
+                ),
+                LogEntry::new(
+                    Term::new(1),
+                    "B".to_string(),
+                ),
+            ],
+            LogIndex::ZERO,
+        );
+
+    let response =
+        follower.handle_append_entries(
+            setup_request
+        );
+
+    assert!(response.success);
+
+    assert_eq!(
+        follower.log().last_index(),
+        LogIndex::new(2)
+    );
+
+    // Simulate stale leader knowledge that index 3
+    // had already been replicated.
+    leader.handle_append_entries_response(
+        follower_id,
+        AppendEntriesResponse::success(
+            Term::new(1),
+            LogIndex::new(3),
+        ),
+    );
+
+    let progress = leader
+        .follower_progress(follower_id)
+        .expect(
+            "leader should track follower"
+        );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(3)
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(4)
+    );
+
+    // First attempt starts at index 3.
+    let request = leader
+        .build_append_entries(
+            follower_id
+        )
+        .expect(
+            "leader should build AppendEntries"
+        );
+
+    assert_eq!(
+        request.prev_log_index,
+        LogIndex::new(3)
+    );
+
+    assert_eq!(
+        request.entries.len(),
+        0
+    );
+
+    // The follower does not have index 3.
+    let response =
+        follower.handle_append_entries(
+            request
+        );
+
+    assert!(
+        !response.success
+    );
+
+    // The leader backs next_index up.
+    leader.handle_append_entries_response(
+        follower_id,
+        response,
+    );
+
+    let progress = leader
+        .follower_progress(follower_id)
+        .expect(
+            "leader should track follower"
+        );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(3)
+    );
+
+    // Retry from index 3.
+    let request = leader
+        .build_append_entries(
+            follower_id
+        )
+        .expect(
+            "leader should build retry"
+        );
+
+    assert_eq!(
+        request.prev_log_index,
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        request.entries.len(),
+        1
+    );
+
+    assert_eq!(
+        request.entries[0].command,
+        "C"
+    );
+
+    let response =
+        follower.handle_append_entries(
+            request
+        );
+
+    assert!(
+        response.success
+    );
+
+    assert_eq!(
+        response.replicated_index,
+        Some(LogIndex::new(3))
+    );
+
+    // The follower has now converged with the leader.
+    assert_eq!(
+        follower.log().last_index(),
+        LogIndex::new(3)
+    );
+
+    assert_eq!(
+        follower.log().term_at(
+            LogIndex::new(3)
+        ),
+        Some(Term::new(1))
+    );
+
+    // Tell the leader that the retry succeeded.
+    leader.handle_append_entries_response(
+        follower_id,
+        response,
+    );
+
+    let progress = leader
+        .follower_progress(follower_id)
+        .expect(
+            "leader should track follower"
+        );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(3)
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(4)
+    );
+}
+
+
+/// Verifies that committed commands are applied
+/// to the state machine in log order.
+#[test]
+fn apply_committed_entries_applies_commands_in_order() {
+    let applied =
+        std::rc::Rc::new(
+            std::cell::RefCell::new(
+                Vec::new()
+            )
+        );
+
+    let state_machine =
+        RecordingStateMachine::new(
+            std::rc::Rc::clone(&applied)
+        );
+
+    let mut node =
+        RaftNode::with_state_machine(
+            ServerId::new(1),
+            state_machine,
+        );
+
+    // Replicate three entries and mark all three
+    // as committed.
+    let request =
+        AppendEntriesRequest::new(
+            Term::new(1),
+            ServerId::new(2),
+            LogIndex::ZERO,
+            Term::ZERO,
+            vec![
+                LogEntry::new(
+                    Term::new(1),
+                    "A".to_string(),
+                ),
+                LogEntry::new(
+                    Term::new(1),
+                    "B".to_string(),
+                ),
+                LogEntry::new(
+                    Term::new(1),
+                    "C".to_string(),
+                ),
+            ],
+            LogIndex::new(3),
+        );
+
+    let response =
+        node.handle_append_entries(
+            request
+        );
+
+    assert!(
+        response.success
+    );
+
+    assert_eq!(
+        node.commit_index(),
+        LogIndex::new(3)
+    );
+
+    assert_eq!(
+        node.last_applied(),
+        LogIndex::new(3)
+    );
+
+    assert_eq!(
+        *applied.borrow(),
+        vec![
+            "A".to_string(),
+            "B".to_string(),
+            "C".to_string(),
+        ]
+    );
+}
+
+/// Verifies that a follower applies newly committed entries in order.
+#[test]
+fn follower_applies_committed_entries_in_order() {
+    let applied = Rc::new(RefCell::new(Vec::new()));
+
+    let state_machine =
+        RecordingStateMachine::new(Rc::clone(&applied));
+
+    let follower_id = ServerId::new(1);
+    let leader_id = ServerId::new(2);
+
+    let mut follower = RaftNode::with_state_machine(
+        follower_id,
+        state_machine,
+    );
+
+    let entries = vec![
+        LogEntry::new(
+            Term::new(1),
+            "A".to_string(),
+        ),
+        LogEntry::new(
+            Term::new(1),
+            "B".to_string(),
+        ),
+        LogEntry::new(
+            Term::new(1),
+            "C".to_string(),
+        ),
+    ];
+
+    let request = AppendEntriesRequest::new(
+        Term::new(1),
+        leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        entries,
+        LogIndex::new(2),
+    );
+
+    let response = follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        follower.commit_index(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        follower.last_applied(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        *applied.borrow(),
+        vec![
+            "A".to_string(),
+            "B".to_string(),
+        ]
+    );
+
+    // A later heartbeat with the same commit index
+    // must not apply the entries again.
+    let request = AppendEntriesRequest::heartbeat(
+        Term::new(1),
+        leader_id,
+        LogIndex::new(3),
+        Term::new(1),
+        LogIndex::new(2),
+    );
+
+    let response = follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        follower.last_applied(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        *applied.borrow(),
+        vec![
+            "A".to_string(),
+            "B".to_string(),
+        ]
+    );
+}
+
+
+/// Verifies that stale AppendEntries does not reset election timeout.
+#[test]
+fn stale_append_entries_does_not_reset_election_timer() {
+    let server_id = ServerId::new(1);
+    let old_leader_id = ServerId::new(2);
+    let current_leader_id = ServerId::new(3);
+
+    let mut node = RaftNode::<String>::new(
+        server_id
+    );
+
+    // Move the follower to term 2.
+    let request = AppendEntriesRequest::heartbeat(
+        Term::new(2),
+        current_leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        LogIndex::ZERO,
+    );
+
+    let response = node.handle_append_entries(request);
+
+    assert!(response.success);
+    assert_eq!(
+        node.current_term(),
+        Term::new(2)
+    );
+
+    // Get close to the election timeout.
+    for _ in 0..4 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Follower
+    );
+
+    // A delayed heartbeat from the old term must be ignored.
+    let stale_request =
+        AppendEntriesRequest::heartbeat(
+            Term::new(1),
+            old_leader_id,
+            LogIndex::ZERO,
+            Term::ZERO,
+            LogIndex::ZERO,
+        );
+
+    let response =
+        node.handle_append_entries(stale_request);
+
+    assert!(!response.success);
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(2)
+    );
+
+    // The stale message must not have reset the timer.
+    // The next tick should therefore trigger an election.
+    node.tick();
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(3)
+    );
+}
+
+/// Verifies that granting a vote resets the election timeout.
+#[test]
+fn granting_vote_resets_election_timer() {
+    let server_id = ServerId::new(1);
+    let candidate_id = ServerId::new(2);
+
+    let mut node =
+        RaftNode::<String>::new(server_id);
+
+    // Move close to the election timeout.
+    for _ in 0..4 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Follower
+    );
+
+    // Grant a valid vote in the current term.
+    let request = RequestVoteRequest::new(
+        Term::ZERO,
+        candidate_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    let response =
+        node.handle_request_vote(request);
+
+    assert!(response.vote_granted);
+    assert_eq!(
+        node.voted_for(),
+        Some(candidate_id)
+    );
+
+    // The vote should have reset the election timer.
+    // Four more ticks must still leave the node
+    // as a follower.
+    for _ in 0..4 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Follower
+    );
+
+    // The fifth tick after the reset should
+    // eventually cause a new election.
+    node.tick();
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+}
+
+/// Verifies that a candidate steps down when a valid leader appears.
+#[test]
+fn candidate_steps_down_on_current_term_append_entries() {
+    let candidate_id = ServerId::new(1);
+    let leader_id = ServerId::new(2);
+
+    let mut node =
+        RaftNode::<String>::new(candidate_id);
+
+    // Start an election.
+    node.start_election();
+
+    assert_eq!(
+        node.role(),
+        Role::Candidate
+    );
+
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+
+    assert!(
+        node.election().is_some()
+    );
+
+    // A leader in the same term establishes itself
+    // with an AppendEntries heartbeat.
+    let request =
+        AppendEntriesRequest::heartbeat(
+            Term::new(1),
+            leader_id,
+            LogIndex::ZERO,
+            Term::ZERO,
+            LogIndex::ZERO,
+        );
+
+    let response =
+        node.handle_append_entries(request);
+
+    assert!(response.success);
+
+    // The candidate must step down.
+    assert_eq!(
+        node.role(),
+        Role::Follower
+    );
+
+    // The old election must no longer exist.
+    assert!(
+        node.election().is_none()
+    );
+
+    // The term remains unchanged because the
+    // AppendEntries is from the current term.
+    assert_eq!(
+        node.current_term(),
+        Term::new(1)
+    );
+
+    // The heartbeat reset the election timer.
+    // Four ticks must still leave us as a follower.
+    for _ in 0..4 {
+        node.tick();
+    }
+
+    assert_eq!(
+        node.role(),
+        Role::Follower
     );
 }

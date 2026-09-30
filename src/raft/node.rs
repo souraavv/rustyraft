@@ -218,6 +218,11 @@ where
         // node cannot vote for a different candidate in the same term.
         self.persistent.voted_for = Some(request.candidate_id);
 
+        // Granting a valid vote is election activity
+        // reset the timer so that follower does not immediately
+        // start another election
+        self.election_timer.reset();
+
         tracing::info!(
             server_id = self.id.value(),
             candidate_id = request.candidate_id.value(),
@@ -980,6 +985,24 @@ where
         requests
     } 
 
+    pub fn from_persistent_state(
+        id: ServerId,
+        persistent: PersistentState<RaftLog<C>>,
+        state_machine: S
+    ) -> Self {
+        Self {
+            id, 
+            role: Role::Follower,
+            persistent,
+            volatile: VolatileState::new(),
+            state_machine,
+            leader: None, 
+            election: None, 
+            election_timer: ElectionTimer::new(5),
+            heartbeat_timer: HeartbeatTimer::new(5),
+        }
+    }
+
     /// ---- Helpers - Getters ----
     pub fn id(&self) -> ServerId {
         self.id
@@ -1019,6 +1042,15 @@ where
 
     pub fn last_log_term(&self) -> Term {
         self.persistent.log.last_term().unwrap_or(Term::ZERO)
+    }
+
+    // method is consuming the entire RaftNode
+    // we want to take the ownership of its persistent state
+    // we are moving this out of the node
+    pub fn into_persistent_state(
+        self,
+    ) -> PersistentState<RaftLog<C>> {
+        self.persistent
     }
 
 }
