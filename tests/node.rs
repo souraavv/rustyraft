@@ -1962,9 +1962,10 @@ fn candidate_steps_down_when_valid_append_entries_arrives() {
     );
 }
 
-
+/// Verifies that a heartbeat is not generated
+/// again before the normal interval expires.
 #[test]
-fn leader_does_not_generate_heartbeat_before_interval() {
+fn leader_does_not_generate_second_heartbeat_before_interval() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
@@ -1986,6 +1987,18 @@ fn leader_does_not_generate_heartbeat_before_interval() {
         Role::Leader
     );
 
+    // The newly elected leader sends its initial
+    // heartbeat immediately.
+    let initial_requests =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        initial_requests.len(),
+        1
+    );
+
+    // Four ticks are not enough for the next
+    // heartbeat interval.
     for _ in 0..4 {
         leader.tick();
     }
@@ -1993,7 +2006,20 @@ fn leader_does_not_generate_heartbeat_before_interval() {
     let requests =
         leader.heartbeat_requests();
 
-    assert!(requests.is_empty());
+    assert!(
+        requests.is_empty()
+    );
+
+    // The fifth tick completes the normal interval.
+    leader.tick();
+
+    let requests =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        requests.len(),
+        1
+    );
 }
 
 #[test]
@@ -3333,5 +3359,242 @@ fn candidate_steps_down_on_current_term_append_entries() {
     assert_eq!(
         node.role(),
         Role::Follower
+    );
+}
+
+/// Verifies that the initial heartbeat is one-shot.
+#[test]
+fn initial_heartbeat_is_followed_by_normal_heartbeat_interval() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let cluster = [
+        leader_id,
+        follower_id,
+    ];
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &cluster,
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // Initial heartbeat is available immediately.
+    let requests =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        requests.len(),
+        1
+    );
+
+    // It must not be generated again immediately.
+    let requests =
+        leader.heartbeat_requests();
+
+    assert!(
+        requests.is_empty()
+    );
+
+    // Normal heartbeat interval now applies.
+    for _ in 0..4 {
+        leader.tick();
+    }
+
+    assert!(
+        leader.heartbeat_requests().is_empty()
+    );
+
+    leader.tick();
+
+    let requests =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        requests.len(),
+        1
+    );
+}
+
+/// Verifies that a leader commits and applies a command
+/// after replication to a majority.
+#[test]
+fn leader_commits_command_after_majority_replication() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    let mut follower =
+        RaftNode::<String>::new(follower_a);
+
+    // Elect node 1.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_a,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &[
+            leader_id,
+            follower_a,
+            follower_b,
+        ],
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // The client command is appended only
+    // to the leader initially.
+    assert_eq!(
+        leader.append_entry(
+            "SET A".to_string()
+        ),
+        Some(LogIndex::new(1))
+    );
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::ZERO
+    );
+
+    assert_eq!(
+        leader.last_applied(),
+        LogIndex::ZERO
+    );
+
+    // Replicate the command to one follower.
+    let request = leader
+        .build_append_entries(follower_a)
+        .expect(
+            "leader should build AppendEntries",
+        );
+
+    assert_eq!(
+        request.entries.len(),
+        1
+    );
+
+    assert_eq!(
+        request.entries[0].command,
+        "SET A"
+    );
+
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    assert_eq!(
+        follower.log().last_index(),
+        LogIndex::new(1)
+    );
+
+    // Leader + follower_a = 2/3,
+    // which is a majority.
+    leader.handle_append_entries_response(
+        follower_a,
+        response,
+    );
+
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::new(1)
+    );
+
+    assert_eq!(
+        leader.last_applied(),
+        LogIndex::new(1)
+    );
+
+    // Applying again must not apply the
+    // already-applied entry again.
+    assert!(
+        leader.apply_committed_entries().is_ok()
+    );
+
+    assert_eq!(
+        leader.last_applied(),
+        LogIndex::new(1)
+    );
+
+    // follower_b was never replicated.
+    // The leader still committed because
+    // leader + follower_a formed the majority.
+    assert_eq!(
+        leader.log().last_index(),
+        LogIndex::new(1)
+    );
+}
+
+/// Verifies that a leader does not commit a command
+/// without replication to a majority.
+#[test]
+fn leader_does_not_commit_without_majority() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    // Elect node 1.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_a,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &[
+            leader_id,
+            follower_a,
+            follower_b,
+        ],
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // Append a command locally.
+    assert_eq!(
+        leader.append_entry(
+            "SET B".to_string()
+        ),
+        Some(LogIndex::new(1))
+    );
+
+    // Nobody else has the command.
+    leader.update_commit_index();
+
+    // Only the leader has the entry: 1/3.
+    assert_eq!(
+        leader.commit_index(),
+        LogIndex::ZERO
+    );
+
+    assert_eq!(
+        leader.last_applied(),
+        LogIndex::ZERO
     );
 }

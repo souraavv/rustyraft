@@ -78,6 +78,9 @@ pub struct RaftNode<
 
     // Heart beat timeouts
     heartbeat_timer: HeartbeatTimer,
+    // A newly elected leader must send
+    // an initial heartbeat immediately.
+    initial_heartbeat_pending: bool,
     // If I win the election then as a leader 
     // I will maintain a  volatile state 
     // I will use this to remember the replication state which is basically
@@ -120,6 +123,7 @@ where
             election: None,
             election_timer: ElectionTimer::new(5),
             heartbeat_timer: HeartbeatTimer::new(5),
+            initial_heartbeat_pending: false,
         }
     }
     // -----------------------------------------------
@@ -399,6 +403,10 @@ where
 
         self.role = Role::Leader;
 
+        // The new leader must immediately establish
+        // its authority with an AppendEntries heartbeat.
+        self.initial_heartbeat_pending = true;
+
         // leader assume each follower has log until its last log index
         // later when it will discover differently it will share the append
         // entries accordingly
@@ -416,6 +424,7 @@ where
             follower_count = followers.len(),
             "Raft node became leader"
         );
+
     }
 
     // -----------------------------------------------
@@ -942,11 +951,14 @@ where
     where 
         C: Clone, 
     {
-        if self.role != Role::Leader {
+        if self.role != Role::Leader 
+        {
             return Vec::new();
         }
 
-        if !self.heartbeat_timer.expired() {
+        if !self.initial_heartbeat_pending 
+            && !self.heartbeat_timer.expired() 
+        {
             return Vec::new();
         }
 
@@ -975,6 +987,7 @@ where
         }
 
         self.heartbeat_timer.reset();
+        self.initial_heartbeat_pending = false;
 
         tracing::debug!(
             server_id = self.id.value(),
@@ -1000,6 +1013,7 @@ where
             election: None, 
             election_timer: ElectionTimer::new(5),
             heartbeat_timer: HeartbeatTimer::new(5),
+            initial_heartbeat_pending: false,
         }
     }
 
@@ -1089,6 +1103,7 @@ impl<C> RaftNode<C, NoopStateMachine> {
             election_timer: ElectionTimer::new(5), 
             heartbeat_timer: HeartbeatTimer::new(5), 
             state_machine: NoopStateMachine,
+            initial_heartbeat_pending: false,
         }
     }
 }
