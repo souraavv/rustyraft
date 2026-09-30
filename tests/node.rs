@@ -2002,3 +2002,267 @@ fn leader_generates_heartbeat_for_each_follower() {
             .all(|(_, request)| request.entries.is_empty())
     );
 }
+
+#[test]
+fn heartbeat_reaches_follower_and_resets_election_timer() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let cluster = [
+        leader_id,
+        follower_id,
+    ];
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    let mut follower =
+        RaftNode::<String>::new(follower_id);
+
+    // Elect the leader.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &cluster,
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // Let the leader heartbeat timer expire.
+    for _ in 0..5 {
+        leader.tick();
+    }
+
+    let requests =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        requests.len(),
+        1
+    );
+
+    let (_, request) =
+        requests.into_iter().next().expect(
+            "leader should generate one heartbeat"
+        );
+
+    assert!(
+        request.entries.is_empty()
+    );
+
+    // Let the follower get close to its election timeout.
+    for _ in 0..4 {
+        follower.tick();
+    }
+
+    assert_eq!(
+        follower.role(),
+        Role::Follower
+    );
+
+    // Deliver the heartbeat.
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(response.success);
+
+    // The heartbeat should have reset the follower's
+    // election timer. Therefore another four ticks should
+    // still not start an election.
+    for _ in 0..4 {
+        follower.tick();
+    }
+
+    assert_eq!(
+        follower.role(),
+        Role::Follower
+    );
+}
+
+#[test]
+fn successful_heartbeat_does_not_advance_match_index() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let cluster = [
+        leader_id,
+        follower_id,
+    ];
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    let mut follower =
+        RaftNode::<String>::new(follower_id);
+
+    // Elect the leader.
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &cluster,
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    let progress_before =
+        leader
+            .follower_progress(follower_id)
+            .expect(
+                "follower progress should exist"
+            );
+
+    assert_eq!(
+        progress_before.match_index,
+        LogIndex::ZERO
+    );
+
+    assert_eq!(
+        progress_before.next_index,
+        LogIndex::new(1)
+    );
+
+    // Wait for the heartbeat interval.
+    for _ in 0..5 {
+        leader.tick();
+    }
+
+    let requests =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        requests.len(),
+        1
+    );
+
+    let (_, request) =
+        requests.into_iter().next().expect(
+            "leader should generate heartbeat"
+        );
+
+    assert!(
+        request.entries.is_empty()
+    );
+
+    // Deliver the heartbeat.
+    let response =
+        follower.handle_append_entries(request);
+
+    assert!(
+        response.success
+    );
+
+    // A heartbeat contains no new log entry.
+    leader.handle_append_entries_response(
+        follower_id,
+        response,
+        LogIndex::ZERO,
+    );
+
+    let progress_after =
+        leader
+            .follower_progress(follower_id)
+            .expect(
+                "follower progress should exist"
+            );
+
+    // Nothing was replicated.
+    assert_eq!(
+        progress_after.match_index,
+        LogIndex::ZERO
+    );
+
+    // No new entry was replicated, so next_index
+    // must also remain unchanged.
+    assert_eq!(
+        progress_after.next_index,
+        LogIndex::new(1)
+    );
+}
+
+#[test]
+fn leader_generates_heartbeat_again_after_next_interval() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+
+    let cluster = [
+        leader_id,
+        follower_id,
+    ];
+
+    let mut leader =
+        RaftNode::<String>::new(leader_id);
+
+    leader.start_election();
+
+    leader.handle_request_vote_response(
+        follower_id,
+        RequestVoteResponse::granted(
+            Term::new(1),
+        ),
+        &cluster,
+    );
+
+    assert_eq!(
+        leader.role(),
+        Role::Leader
+    );
+
+    // First heartbeat round.
+    for _ in 0..5 {
+        leader.tick();
+    }
+
+    let first_round =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        first_round.len(),
+        1
+    );
+
+    // The timer must have been reset after the
+    // first heartbeat round.
+    let no_second_round =
+        leader.heartbeat_requests();
+
+    assert!(
+        no_second_round.is_empty()
+    );
+
+    // Four ticks are not enough for another heartbeat.
+    for _ in 0..4 {
+        leader.tick();
+    }
+
+    let still_no_round =
+        leader.heartbeat_requests();
+
+    assert!(
+        still_no_round.is_empty()
+    );
+
+    // The fifth tick completes the next interval.
+    leader.tick();
+
+    let second_round =
+        leader.heartbeat_requests();
+
+    assert_eq!(
+        second_round.len(),
+        1
+    );
+}

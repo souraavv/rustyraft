@@ -8,8 +8,10 @@ pub mod rpc;
 pub mod state;
 pub mod commit;
 pub mod state_machine;
+pub mod transport;
 
 pub use log::{LogEntry, RaftLog};
-pub use node::RaftNode;
+pub use node::{RaftNode};
+
 pub use state::{LogIndex, Role, ServerId, Term};
 pub use election::{ElectionTimer, HeartbeatTimer};

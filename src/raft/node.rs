@@ -126,6 +126,17 @@ where
     // -------------------- Voting -------------------
     // -----------------------------------------------
     
+    pub fn build_request_vote(
+        &self
+    ) -> RequestVoteRequest {
+        RequestVoteRequest::new(
+            self.current_term(),
+            self.id,
+            self.persistent.log.last_index(),
+            self.persistent.log.last_term().unwrap_or(Term::ZERO),
+        )
+    }
+
     /// Hanldes a RequestVote RPC
     /// 
     /// The node owns the state changes required by the RPC while election
