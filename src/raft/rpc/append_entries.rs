@@ -19,6 +19,10 @@ pub struct AppendEntriesRequest<C> {
 pub struct AppendEntriesResponse {
     pub term: Term,
     pub success: bool,
+
+    /// The highest log index established by this successful
+    /// AppendEntries RPC.
+    pub replicated_index: Option<LogIndex>,
 }
 
 impl<C> AppendEntriesRequest<C> {
@@ -60,17 +64,26 @@ impl<C> AppendEntriesRequest<C> {
 }
 
 impl AppendEntriesResponse {
-    pub fn success(term: Term) -> Self {
+    pub fn success(
+        term: Term,
+        replicated_index: LogIndex,
+    ) -> Self {
         Self {
             term,
             success: true,
+            replicated_index: Some(
+                replicated_index,
+            ),
         }
     }
 
-    pub fn failure(term: Term) -> Self {
-        Self {
-            term,
-            success: false,
-        }
+    pub fn failure(
+        term: Term,
+    ) -> Self {
+            Self {
+                term,
+                success: false,
+                replicated_index: None,
+            }
     }
 }

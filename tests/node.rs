@@ -794,7 +794,6 @@ fn leader_and_follower_complete_log_replication_round() {
     leader.handle_append_entries_response(
         follower_id,
         response,
-        LogIndex::new(3),
     );
 
     let progress = leader
@@ -869,8 +868,10 @@ fn leader_backs_up_next_index_when_follower_is_missing_index() {
     // were replicated. This puts next_index at 4.
     leader.handle_append_entries_response(
         follower_id,
-        AppendEntriesResponse::success(Term::new(1)),
+        AppendEntriesResponse::success(
+        Term::new(1),
         LogIndex::new(3),
+    ),
     );
 
     let progress = leader
@@ -911,7 +912,6 @@ fn leader_backs_up_next_index_when_follower_is_missing_index() {
     leader.handle_append_entries_response(
         follower_id,
         response,
-        LogIndex::ZERO,
     );
 
     let progress = leader
@@ -992,8 +992,10 @@ fn leader_retries_append_entries_after_failure() {
     // next_index  = 4
     leader.handle_append_entries_response(
         follower_id,
-        AppendEntriesResponse::success(Term::new(1)),
+        AppendEntriesResponse::success(
+        Term::new(1),
         LogIndex::new(3),
+    ),
     );
 
     let progress = leader
@@ -1033,7 +1035,6 @@ fn leader_retries_append_entries_after_failure() {
     leader.handle_append_entries_response(
         follower_id,
         response,
-        LogIndex::ZERO,
     );
 
     // Failure backs next_index from 4 to 3.
@@ -1081,7 +1082,6 @@ fn leader_retries_append_entries_after_failure() {
     leader.handle_append_entries_response(
         follower_id,
         retry_response,
-        LogIndex::new(3),
     );
 
     let progress = leader
@@ -1156,7 +1156,6 @@ fn leader_advances_commit_index_after_majority_replication() {
     leader.handle_append_entries_response(
         follower_id,
         response,
-        LogIndex::new(1),
     );
 
     // Leader + follower = 2/2, which is a majority.
@@ -1242,7 +1241,6 @@ fn leader_commits_entry_after_replicating_to_follower() {
     leader.handle_append_entries_response(
         follower_id,
         response,
-        LogIndex::new(1),
     );
 
     // Replication is now on a majority:
@@ -1425,8 +1423,10 @@ fn leader_commit_index_never_moves_backward() {
 
     leader.handle_append_entries_response(
         follower_id,
-        AppendEntriesResponse::success(Term::new(1)),
+        AppendEntriesResponse::success(
+        Term::new(1),
         LogIndex::new(1),
+    ),
     );
 
     leader.update_commit_index();
@@ -1615,7 +1615,6 @@ fn last_applied_does_not_advance_when_application_fails() {
     leader.handle_append_entries_response(
         follower_id,
         response,
-        LogIndex::new(1),
     );
 
     // Replicate entry B.
@@ -1633,7 +1632,6 @@ fn last_applied_does_not_advance_when_application_fails() {
     leader.handle_append_entries_response(
         follower_id,
         response,
-        LogIndex::new(2),
     );
 
     // Both entries are now replicated on a majority.
@@ -2169,7 +2167,6 @@ fn successful_heartbeat_does_not_advance_match_index() {
     leader.handle_append_entries_response(
         follower_id,
         response,
-        LogIndex::ZERO,
     );
 
     let progress_after =

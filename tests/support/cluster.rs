@@ -21,7 +21,7 @@ pub struct TestCluster<C> {
     transport: InMemoryTransport<C>,
 }
 
-pub struct RequestVoteDelivery {
+pub struct MessageDelivery {
     pub from: ServerId,
     pub to: ServerId,
 }
@@ -121,75 +121,107 @@ impl <C: Clone> TestCluster<C> {
     pub fn deliver_to(
         &mut self,
         server_id: ServerId,
-    ) ->  Option<RequestVoteDelivery> {
+    ) -> Option<MessageDelivery> {
+        let message =
+            self.transport
+                .deliver_to(server_id)?;
 
-        let message = self
-            .transport
-            .deliver_to(server_id)?;
         let from = message.from;
         let to = message.to;
-        
-        let destination = message.to;
 
-        let node = 
-                self.nodes.get_mut(&destination)
-                .expect("destination node should exists");
-        
-        match message.payload {
-            RaftMessagePayload::RequestVote(
-                request
-            ) => {
-                let response = 
-                    node.handle_request_vote(
-                        request,
+        let cluster_servers: Vec<ServerId> =
+            self.nodes
+                .keys()
+                .copied()
+                .collect();
+
+        let mut response_message = None;
+
+        {
+            let node =
+                self.nodes
+                    .get_mut(&to)
+                    .expect(
+                        "message destination should exist"
                     );
-                
-                // response ownership is moved here
-                self.transport.send(
-                    RaftMessage::new(
-                        to,
-                        from,
-                        RaftMessagePayload::<C>::RequestVoteResponse(
-                            response,
+
+            match message.payload {
+                RaftMessagePayload::RequestVote(
+                    request,
+                ) => {
+                    let response =
+                        node.handle_request_vote(
+                            request,
+                        );
+
+                    response_message = Some(
+                        RaftMessage::new(
+                            to,
+                            from,
+                            RaftMessagePayload::<C>::RequestVoteResponse(
+                                response,
+                            ),
                         ),
-                    ),
-                );
+                    );
+                }
 
-                Some(RequestVoteDelivery {
-                    from,
-                    to,
-                })
-            } 
-
-            RaftMessagePayload::AppendEntries(
-                request,
-            ) => {
-                let response = 
-                    node.handle_append_entries(request);
-
-                // we will add later
-                tracing::debug!(
-                    from = message.from.value(),
-                    to = destination.value(),
-                    success = response.success,
-                    "Delivered AppendEntries"
-                );
-                
-                // response ownership is moved here.
-                self.transport.send(
-                    RaftMessage::new(
-                        to,
+                RaftMessagePayload::RequestVoteResponse(
+                    response,
+                ) => {
+                    node.handle_request_vote_response(
                         from,
-                        RaftMessagePayload::<C>::AppendEntriesResponse(
-                            response,
-                        ),
-                    ),
-                );
+                        response,
+                        &cluster_servers,
+                    );
+                }
 
-                None
+                RaftMessagePayload::AppendEntries(
+                    request,
+                ) => {
+                    let response =
+                        node.handle_append_entries(
+                            request,
+                        );
+
+                    tracing::debug!(
+                        from = from.value(),
+                        to = to.value(),
+                        success = response.success,
+                        "Delivered AppendEntries"
+                    );
+
+                    response_message = Some(
+                        RaftMessage::new(
+                            to,
+                            from,
+                            RaftMessagePayload::<C>::AppendEntriesResponse(
+                                response,
+                            ),
+                        ),
+                    );
+                }
+
+                RaftMessagePayload::AppendEntriesResponse(
+                    response,
+                ) => {
+                    node.handle_append_entries_response(
+                        from,
+                        response,
+                    );
+                }
             }
-            _ => None
         }
+
+        if let Some(response) =
+            response_message
+        {
+            self.transport.send(response);
+        }
+
+        Some(MessageDelivery {
+            from,
+            to,
+        })
     }
 
     pub fn deliver_request_vote_response(
@@ -242,7 +274,11 @@ impl <C: Clone> TestCluster<C> {
         leader_id: ServerId, 
     ) -> bool {
 
-        let message = match self.transport.deliver_to(leader_id) {
+        let message = match 
+            self
+                .transport
+                .deliver_to(leader_id) 
+        {
             Some(message) => message,
             None => return false,
         };
@@ -264,8 +300,46 @@ impl <C: Clone> TestCluster<C> {
 
         leader.handle_append_entries_response(
             from, 
-            response, 
-            leader.last_log_index()
+            response,
+        );
+
+        true
+    }
+
+    /// From a given leader_id to a given follower_id
+    pub fn send_append_entries(
+        &mut self,
+        leader_id: ServerId,
+        follower_id: ServerId,
+    ) -> bool {
+
+        // create the request which leader will provide you by building
+        // append entry requst for a given follower
+        let request = {
+            let leader =
+                self.nodes
+                    .get(&leader_id)
+                    .expect(
+                        "leader should exist"
+                    );
+
+            match leader.build_append_entries(
+                follower_id,
+            ) {
+                Some(request) => request,
+                None => return false,
+            }
+        };
+
+        // Sending the RaftMessage on the transport layer
+        self.transport.send(
+            RaftMessage::new(
+                leader_id,
+                follower_id,
+                RaftMessagePayload::<C>::AppendEntries(
+                    request,
+                ),
+            ),
         );
 
         true

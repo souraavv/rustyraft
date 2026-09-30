@@ -32,7 +32,9 @@ fn successful_replication_advances_progress() {
     let mut progress =
         FollowerProgress::new(LogIndex::new(5));
 
-    progress.record_success(LogIndex::new(5));
+    progress.record_success(
+        LogIndex::new(5),
+    );
 
     assert_eq!(
         progress.match_index,
@@ -50,8 +52,13 @@ fn stale_success_does_not_move_match_index_backwards() {
     let mut progress =
         FollowerProgress::new(LogIndex::new(5));
 
-    progress.record_success(LogIndex::new(5));
-    progress.record_success(LogIndex::new(3));
+    progress.record_success(
+        LogIndex::new(5),
+    );
+
+    progress.record_success(
+        LogIndex::new(3),
+    );
 
     assert_eq!(
         progress.match_index,
@@ -171,7 +178,9 @@ fn unknown_follower_has_no_progress() {
         );
 
     assert!(
-        state.progress(ServerId::new(99)).is_none()
+        state
+            .progress(ServerId::new(99))
+            .is_none()
     );
 }
 
@@ -205,7 +214,6 @@ fn test_log() -> RaftLog<String> {
 fn build_append_entries_sends_entries_from_next_index() {
     let follower = ServerId::new(2);
     let leader = ServerId::new(1);
-
     let log = test_log();
 
     let replication = ReplicationState::new(
@@ -312,7 +320,6 @@ fn build_append_entries_returns_none_for_unknown_follower() {
     let follower = ServerId::new(2);
     let unknown = ServerId::new(3);
     let leader = ServerId::new(1);
-
     let log = test_log();
 
     let replication = ReplicationState::new(
@@ -320,13 +327,14 @@ fn build_append_entries_returns_none_for_unknown_follower() {
         log.last_index(),
     );
 
-    let request = replication.build_append_entries(
-        unknown,
-        leader,
-        Term::new(2),
-        &log,
-        LogIndex::ZERO,
-    );
+    let request = replication
+        .build_append_entries(
+            unknown,
+            leader,
+            Term::new(2),
+            &log,
+            LogIndex::ZERO,
+        );
 
     assert!(request.is_none());
 }
@@ -335,19 +343,21 @@ fn build_append_entries_returns_none_for_unknown_follower() {
 fn successful_append_entries_response_advances_progress() {
     let follower = ServerId::new(2);
 
-    let mut state = ReplicationState::new(
-        &[follower],
-        LogIndex::new(5),
-    );
+    let mut state =
+        ReplicationState::new(
+            &[follower],
+            LogIndex::new(5),
+        );
 
-    let response = rustyraft::raft::rpc::AppendEntriesResponse::success(
-        Term::new(1),
-    );
+    let response =
+        rustyraft::raft::rpc::AppendEntriesResponse::success(
+            Term::new(1),
+            LogIndex::new(5),
+        );
 
     assert!(state.handle_response(
         follower,
         &response,
-        LogIndex::new(5),
     ));
 
     assert_eq!(
@@ -365,19 +375,20 @@ fn successful_append_entries_response_advances_progress() {
 fn failed_append_entries_response_backs_up_next_index() {
     let follower = ServerId::new(2);
 
-    let mut state = ReplicationState::new(
-        &[follower],
-        LogIndex::new(5),
-    );
+    let mut state =
+        ReplicationState::new(
+            &[follower],
+            LogIndex::new(5),
+        );
 
-    let response = rustyraft::raft::rpc::AppendEntriesResponse::failure(
-        Term::new(1),
-    );
+    let response =
+        rustyraft::raft::rpc::AppendEntriesResponse::failure(
+            Term::new(1),
+        );
 
     assert!(state.handle_response(
         follower,
         &response,
-        LogIndex::ZERO,
     ));
 
     assert_eq!(
@@ -399,10 +410,11 @@ fn replication_returns_match_indexes_for_all_followers() {
         ServerId::new(4),
     ];
 
-    let mut replication = ReplicationState::new(
-        &followers,
-        LogIndex::new(5),
-    );
+    let mut replication =
+        ReplicationState::new(
+            &followers,
+            LogIndex::new(5),
+        );
 
     replication.record_success(
         ServerId::new(2),
@@ -419,7 +431,8 @@ fn replication_returns_match_indexes_for_all_followers() {
         LogIndex::new(2),
     );
 
-    let match_indexes = replication.match_indexes();
+    let match_indexes =
+        replication.match_indexes();
 
     assert_eq!(
         match_indexes,
@@ -428,5 +441,90 @@ fn replication_returns_match_indexes_for_all_followers() {
             LogIndex::new(5),
             LogIndex::new(2),
         ]
+    );
+}
+
+#[test]
+fn successful_replication_is_monotonic() {
+    let mut progress =
+        FollowerProgress::new(
+            LogIndex::new(6),
+        );
+
+    progress.record_success(
+        LogIndex::new(5),
+    );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(5),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(6),
+    );
+
+    progress.record_success(
+        LogIndex::new(3),
+    );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(5),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(6),
+    );
+}
+
+#[test]
+fn failed_replication_does_not_move_before_match_index() {
+    let mut progress =
+        FollowerProgress::new(
+            LogIndex::new(6),
+        );
+
+    progress.record_success(
+        LogIndex::new(5),
+    );
+
+    progress.record_failure();
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(5),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        progress.match_index,
+    );
+}
+
+#[test]
+fn failed_replication_can_backoff_to_match_boundary() {
+    let mut progress =
+        FollowerProgress::new(
+            LogIndex::new(6),
+        );
+
+    progress.record_success(
+        LogIndex::new(5),
+    );
+
+    progress.record_failure();
+    progress.record_failure();
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(5),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        progress.match_index,
     );
 }

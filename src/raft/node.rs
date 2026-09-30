@@ -422,10 +422,10 @@ where
     /// The follower first verifies that the leader's previous log entry
     /// matches its own log before modifying anything.
     pub fn handle_append_entries(
-        &mut self, 
+        &mut self,
         request: AppendEntriesRequest<C>,
     ) -> AppendEntriesResponse {
-        
+
         tracing::debug!(
             server_id = self.id.value(),
             leader_id = request.leader_id.value(),
@@ -499,14 +499,19 @@ where
             let previous_entry_matches = self
                 .persistent
                 .log
-                .matches(request.prev_log_index, request.prev_log_term);
+                .matches(
+                    request.prev_log_index,
+                    request.prev_log_term,
+                );
 
             if !previous_entry_matches {
                 tracing::debug!(
                     server_id = self.id.value(),
                     leader_id = request.leader_id.value(),
-                    prev_log_index = request.prev_log_index.value(),
-                    prev_log_term = request.prev_log_term.value(),
+                    prev_log_index =
+                        request.prev_log_index.value(),
+                    prev_log_term =
+                        request.prev_log_term.value(),
                     local_last_index =
                         self.persistent.log.last_index().value(),
                     "AppendEntries log consistency check failed"
@@ -522,6 +527,8 @@ where
             }
         }
 
+        let entry_count =
+            request.entries.len();
         // The previous entry matches, so the leader and follower agree
         // up to this point. Reconcile the entries that follow it.
 
@@ -529,7 +536,9 @@ where
         // They will go at prev_log_index + offset + 1 
         for (offset, entry) in request.entries.into_iter().enumerate() {
             let index = LogIndex::new(
-                request.prev_log_index.value() + offset as u64 + 1,
+                request.prev_log_index.value()
+                    + offset as u64
+                    + 1,
             );
 
             // Fetch the term at the next log entry (log = Vec<LogEntry<C>>)
@@ -578,19 +587,38 @@ where
                 server_id = self.id.value(),
                 old_commit_index =
                     self.volatile.commit_index.value(),
-                new_commit_index = new_commit_index.value(),
-                leader_commit = request.leader_commit.value(),
+                new_commit_index =
+                    new_commit_index.value(),
+                leader_commit =
+                    request.leader_commit.value(),
                 "Advancing follower commit index"
             );
             self.volatile.commit_index = new_commit_index;
         }
 
-        if let Err(_) = self.apply_committed_entries() {
+        if let Err(_) =
+            self.apply_committed_entries()
+        {
             tracing::error!(
                 server_id = self.id.value(),
                 "Failed to apply committed entries"
             );
         }
+
+        // The request was accepted, so now determine the highest
+        // log index established by this AppendEntries RPC.
+        let replicated_index =
+            LogIndex::new(
+                request
+                    .prev_log_index
+                    .value()
+                    .checked_add(
+                        entry_count as u64,
+                    )
+                    .expect(
+                        "AppendEntries index exhausted",
+                    ),
+            );
 
         tracing::debug!(
             server_id = self.id.value(),
@@ -598,14 +626,17 @@ where
             term = self.persistent.current_term.value(),
             last_log_index =
                 self.persistent.log.last_index().value(),
-            commit_index = self.volatile.commit_index.value(),
+            replicated_index =
+                replicated_index.value(),
+            commit_index =
+                self.volatile.commit_index.value(),
             "AppendEntries accepted"
         );
 
         AppendEntriesResponse::success(
             self.persistent.current_term,
+            replicated_index,
         )
-        
     }
 
     /// Build an AppendEntries request for a follower
@@ -639,7 +670,6 @@ where
         &mut self, 
         follower_id: ServerId,
         response: AppendEntriesResponse,
-        replicated_index: LogIndex,
     ) {
 
         if self.role != Role::Leader {
@@ -685,12 +715,11 @@ where
                 return;
             }
         };
-        
+
         // handle success or failure
         leader.replication.handle_response(
             follower_id,
             &response,
-            replicated_index,
         );
 
         // update follower match_index
