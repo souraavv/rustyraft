@@ -105,6 +105,27 @@ impl<C> InMemoryTransport<C> {
         true
     }
 
+    /// Remove and return the message at the given queue position.
+    ///
+    /// This is used by deterministic tests to intentionally
+    /// reorder messages.
+    pub fn deliver_at(
+        &mut self,
+        position: usize,
+    ) -> Option<RaftMessage<C>> {
+        let message =
+            self.messages.get(position)?;
+
+        tracing::debug!(
+            from = message.from.value(),
+            to = message.to.value(),
+            position,
+            "Delivering Raft message by queue position"
+        );
+
+        self.messages.remove(position)
+    }
+
     pub fn has_pending(&self) -> bool {
         !self.messages.is_empty()
     }

@@ -126,6 +126,71 @@ impl <C: Clone> TestCluster<C> {
             self.transport
                 .deliver_to(server_id)?;
 
+        Some(
+            self.deliver_message(
+                message,
+            )
+        )
+    }
+
+    pub fn deliver_at(
+        &mut self,
+        position: usize,
+    ) -> Option<MessageDelivery> {
+        let message =
+            self.transport
+                .deliver_at(position)?;
+
+        Some(
+            self.deliver_message(
+                message,
+            )
+        )
+    }
+
+    /// From a given leader_id to a given follower_id
+    pub fn send_append_entries(
+        &mut self,
+        leader_id: ServerId,
+        follower_id: ServerId,
+    ) -> bool {
+
+        // create the request which leader will provide you by building
+        // append entry requst for a given follower
+        let request = {
+            let leader =
+                self.nodes
+                    .get(&leader_id)
+                    .expect(
+                        "leader should exist"
+                    );
+
+            match leader.build_append_entries(
+                follower_id,
+            ) {
+                Some(request) => request,
+                None => return false,
+            }
+        };
+
+        // Sending the RaftMessage on the transport layer
+        self.transport.send(
+            RaftMessage::new(
+                leader_id,
+                follower_id,
+                RaftMessagePayload::<C>::AppendEntries(
+                    request,
+                ),
+            ),
+        );
+
+        true
+    }
+
+    fn deliver_message(
+        &mut self,
+        message: RaftMessage<C>,
+    ) -> MessageDelivery {
         let from = message.from;
         let to = message.to;
 
@@ -215,52 +280,15 @@ impl <C: Clone> TestCluster<C> {
         if let Some(response) =
             response_message
         {
-            self.transport.send(response);
+            self.transport.send(
+                response,
+            );
         }
 
-        Some(MessageDelivery {
+        MessageDelivery {
             from,
             to,
-        })
-    }
-
-    /// From a given leader_id to a given follower_id
-    pub fn send_append_entries(
-        &mut self,
-        leader_id: ServerId,
-        follower_id: ServerId,
-    ) -> bool {
-
-        // create the request which leader will provide you by building
-        // append entry requst for a given follower
-        let request = {
-            let leader =
-                self.nodes
-                    .get(&leader_id)
-                    .expect(
-                        "leader should exist"
-                    );
-
-            match leader.build_append_entries(
-                follower_id,
-            ) {
-                Some(request) => request,
-                None => return false,
-            }
-        };
-
-        // Sending the RaftMessage on the transport layer
-        self.transport.send(
-            RaftMessage::new(
-                leader_id,
-                follower_id,
-                RaftMessagePayload::<C>::AppendEntries(
-                    request,
-                ),
-            ),
-        );
-
-        true
+        }
     }
 
     pub fn drop_to(

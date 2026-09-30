@@ -501,3 +501,102 @@ fn transport_can_drop_message_for_server() {
         )
     );
 }
+
+#[test]
+fn transport_can_reorder_messages() {
+    let mut transport =
+        InMemoryTransport::<String>::new();
+
+    let message_one =
+        RaftMessage::new(
+            ServerId::new(1),
+            ServerId::new(2),
+            RaftMessagePayload::<String>::RequestVote(
+                RequestVoteRequest::new(
+                    Term::new(1),
+                    ServerId::new(1),
+                    LogIndex::ZERO,
+                    Term::ZERO,
+                ),
+            ),
+        );
+
+    let message_two =
+        RaftMessage::new(
+            ServerId::new(1),
+            ServerId::new(2),
+            RaftMessagePayload::<String>::RequestVote(
+                RequestVoteRequest::new(
+                    Term::new(2),
+                    ServerId::new(1),
+                    LogIndex::ZERO,
+                    Term::ZERO,
+                ),
+            ),
+        );
+
+    transport.send(message_one);
+    transport.send(message_two);
+
+    assert_eq!(
+        transport.pending_count(),
+        2,
+    );
+
+    // Queue position is zero-based.
+    // Position 0 is the first message.
+    // Position 1 is the second message.
+    let delivered =
+        transport
+            .deliver_at(1)
+            .expect(
+                "second message should exist",
+            );
+
+    match delivered.payload {
+        RaftMessagePayload::RequestVote(
+            request,
+        ) => {
+            assert_eq!(
+                request.term,
+                Term::new(2),
+            );
+        }
+
+        _ => panic!(
+            "expected RequestVote message"
+        ),
+    }
+
+    assert_eq!(
+        transport.pending_count(),
+        1,
+    );
+
+    let remaining =
+        transport
+            .deliver_next()
+            .expect(
+                "first message should remain",
+            );
+
+    match remaining.payload {
+        RaftMessagePayload::RequestVote(
+            request,
+        ) => {
+            assert_eq!(
+                request.term,
+                Term::new(1),
+            );
+        }
+
+        _ => panic!(
+            "expected RequestVote message"
+        ),
+    }
+
+    assert_eq!(
+        transport.pending_count(),
+        0,
+    );
+}
