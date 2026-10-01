@@ -1776,3 +1776,690 @@ fn cluster_follower_starts_election_without_heartbeat() {
         2,
     );
 }
+
+/// Verifies an isolated leader loses authority and its log converges.
+#[test]
+fn isolated_leader_loses_authority_and_log_converges() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
+    ];
+
+    let mut cluster =
+        TestCluster::new(
+            &server_ids,
+        );
+
+    // Elect server 1 through real RequestVote RPCs.
+    cluster.start_election(
+        leader_id,
+    );
+
+    for _ in 0..4 {
+        cluster
+            .deliver_next()
+            .expect(
+                "election message should exist",
+            );
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .current_term(),
+        Term::new(1),
+    );
+
+    // Establish leader activity so both followers
+    // have recently heard from the leader.
+    cluster.tick(leader_id);
+
+    cluster
+        .deliver_to(follower_a)
+        .expect(
+            "follower A should receive heartbeat",
+        );
+
+    cluster
+        .deliver_to(follower_b)
+        .expect(
+            "follower B should receive heartbeat",
+        );
+
+    // Deliver both heartbeat responses back to the leader.
+    cluster
+        .deliver_to(leader_id)
+        .expect(
+            "leader should receive heartbeat response",
+        );
+
+    cluster
+        .deliver_to(leader_id)
+        .expect(
+            "leader should receive heartbeat response",
+        );
+
+    // Append an uncommitted command to the isolated leader.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry(
+            "X".to_string(),
+        )
+        .expect(
+            "leader should accept command",
+        );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::ZERO,
+    );
+
+    // Server 1 is now isolated. No messages to or from
+    // it will be delivered.
+    //
+    // Let follower A reach its election timeout.
+    for _ in 0..5 {
+        cluster.tick(follower_a);
+    }
+
+    assert!(
+        cluster
+            .drop_to(leader_id),
+        "RequestVote to isolated leader should exist",
+    );
+
+    // Deliver follower A's RequestVote to follower B.
+    cluster
+        .deliver_to(follower_b)
+        .expect(
+            "follower B should receive RequestVote",
+        );
+
+    // Deliver B's vote response to A.
+    cluster
+        .deliver_to(follower_a)
+        .expect(
+            "candidate should receive vote",
+        );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .current_term(),
+        Term::new(2),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower should exist")
+            .current_term(),
+        Term::new(2),
+    );
+
+    // The majority partition can continue making progress.
+    cluster
+        .node_mut(follower_a)
+        .expect("new leader should exist")
+        .append_entry(
+            "Y".to_string(),
+        )
+        .expect(
+            "new leader should accept command",
+        );
+
+    assert!(
+        cluster.send_append_entries(
+            follower_a,
+            follower_b,
+        ),
+        "new leader should send AppendEntries",
+    );
+
+    cluster
+        .deliver_to(follower_b)
+        .expect(
+            "follower B should receive command",
+        );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect(
+            "new leader should receive response",
+        );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .commit_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .last_applied(),
+        LogIndex::new(1),
+    );
+
+    // The isolated leader never had a majority, so X
+    // must still be uncommitted.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("isolated leader should exist")
+            .commit_index(),
+        LogIndex::ZERO,
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("isolated leader should exist")
+            .current_term(),
+        Term::new(1),
+    );
+
+    // Heal the partition. The new leader sends its log
+    // to the old leader, replacing the uncommitted X.
+    assert!(
+        cluster.send_append_entries(
+            follower_a,
+            leader_id,
+        ),
+        "new leader should send AppendEntries after healing",
+    );
+
+    cluster
+        .deliver_to(leader_id)
+        .expect(
+            "isolated leader should receive newer AppendEntries",
+        );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect(
+            "new leader should receive response",
+        );
+
+    // The old leader must accept the newer term and step down.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .current_term(),
+        Term::new(2),
+    );
+
+    // The uncommitted X was replaced by Y.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .log_at(
+                LogIndex::new(1),
+            )
+            .map(
+                |entry| entry.command.clone()
+            ),
+        Some(
+            "Y".to_string()
+        ),
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .commit_index(),
+        LogIndex::new(1),
+    );
+}
+
+/// Verifies a crashed follower restarts and catches up with the leader.
+#[test]
+fn cluster_restarts_crashed_follower_and_catches_up() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
+    ];
+
+    let mut cluster =
+        TestCluster::new(&server_ids);
+
+    // Elect the leader.
+    cluster.start_election(leader_id);
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive RequestVote");
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive RequestVote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader
+    );
+
+    // Append the first command.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    // Replicate A to follower A.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive A");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive A response");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1)
+    );
+
+    // Crash follower A after it has persisted A.
+    let storage = cluster
+        .crash_node(follower_a)
+        .expect("follower A should crash");
+
+    assert!(
+        cluster
+            .node(follower_a)
+            .is_none()
+    );
+
+    // The leader should still make progress with follower B.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("B".to_string())
+        .expect("leader should accept second command");
+
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_b
+        )
+    );
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive B");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive B response");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(2)
+    );
+
+    // Restart follower A from its persistent storage.
+    cluster.restart_node(
+        follower_a,
+        storage,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1)
+    );
+
+    // Send the missing suffix to the restarted follower.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("restarted follower should receive B");
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should catch up")
+            .log()
+            .last_index(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should catch up")
+            .log_at(LogIndex::new(1))
+            .expect("A should exist")
+            .command,
+        "A"
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should catch up")
+            .log_at(LogIndex::new(2))
+            .expect("B should exist")
+            .command,
+        "B"
+    );
+
+    // Process the replication response.
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive catch-up response");
+
+    let progress = cluster
+        .node(leader_id)
+        .expect("leader should exist")
+        .follower_progress(follower_a)
+        .expect("leader should track follower A");
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(3)
+    );
+}
+
+/// Verifies the cluster elects a new leader after the leader crashes.
+#[test]
+fn cluster_elects_new_leader_after_leader_crash() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
+    ];
+
+    let mut cluster =
+        TestCluster::new(&server_ids);
+
+    // Elect the initial leader.
+    cluster.start_election(leader_id);
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive RequestVote");
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive RequestVote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader
+    );
+
+    // Append a command to the initial leader.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    // Replicate A to follower A.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive A");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive A response");
+
+    // Replicate A to follower B as well.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_b
+        )
+    );
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive A");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive A response");
+
+    // A is now committed on the original leader.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1)
+    );
+
+    // Crash the current leader.
+    let _storage = cluster
+        .crash_node(leader_id)
+        .expect("leader should crash");
+
+    assert!(
+        cluster
+            .node(leader_id)
+            .is_none()
+    );
+
+    // Follower A starts a new election.
+    cluster.start_election(follower_a);
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive new RequestVote");
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("new leader should receive vote");
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .role(),
+        Role::Leader
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .last_log_index(),
+        LogIndex::new(1)
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .log_at(LogIndex::new(1))
+            .expect("committed entry should exist")
+            .command,
+        "A"
+    );
+
+    // The new leader appends another command.
+    cluster
+        .node_mut(follower_a)
+        .expect("new leader should exist")
+        .append_entry("B".to_string())
+        .expect("new leader should accept command");
+
+    // Replicate B to the surviving follower.
+    assert!(
+        cluster.send_append_entries(
+            follower_a,
+            follower_b
+        )
+    );
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive B");
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("new leader should receive B response");
+
+    // The new leader should commit B.
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .commit_index(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .last_applied(),
+        LogIndex::new(2)
+    );
+
+    // The surviving follower should contain both commands.
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .last_log_index(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log_at(LogIndex::new(1))
+            .expect("A should exist")
+            .command,
+        "A"
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log_at(LogIndex::new(2))
+            .expect("B should exist")
+            .command,
+        "B"
+    );
+}

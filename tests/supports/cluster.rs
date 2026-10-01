@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 
 use rustyraft::raft::{
@@ -7,8 +6,14 @@ use rustyraft::raft::{
     ServerId,
 };
 
+use rustyraft::raft::state_machine::{
+    NoopStateMachine,
+};
+
 use rustyraft::raft::transport::{
-    InMemoryTransport, RaftMessage, RaftMessagePayload,
+    InMemoryTransport,
+    RaftMessage,
+    RaftMessagePayload,
 };
 
 use super::node::{
@@ -18,7 +23,8 @@ use super::node::{
 
 
 use rustyraft::raft::rpc::{
-    RequestVoteRequest, RequestVoteResponse,
+    RequestVoteRequest,
+    RequestVoteResponse,
 };
 
 
@@ -197,6 +203,46 @@ impl TestCluster {
         );
 
         true
+    }
+
+    /// Crashes a node and returns its persistent storage.
+    pub fn crash_node(
+        &mut self,
+        server_id: ServerId,
+    ) -> Option<TestStorage> {
+        let node =
+            self.nodes.remove(
+                &server_id,
+            )?;
+
+        // Remove messages that are waiting to be
+        // delivered to the crashed node.
+        self.transport.drop_to(
+            server_id,
+        );
+
+        Some(
+            node.into_storage()
+        )
+    }
+
+    /// Restarts a node from its recovered persistent storage.
+    pub fn restart_node(
+        &mut self,
+        server_id: ServerId,
+        storage: TestStorage,
+    ) {
+        let node =
+            RaftNode::from_storage(
+                server_id,
+                storage,
+                NoopStateMachine,
+            );
+
+        self.nodes.insert(
+            server_id,
+            node,
+        );
     }
 
     fn deliver_message(
@@ -400,10 +446,12 @@ impl TestCluster {
     }
 
     /// Advances logical time once and delivers one message.
-    pub fn step(&mut self, server_id: ServerId) -> Option<MessageDelivery> {
+    pub fn step(
+        &mut self,
+        server_id: ServerId,
+    ) -> Option<MessageDelivery> {
         self.tick(server_id);
         self.deliver_next()
     }
 
 }
-
