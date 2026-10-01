@@ -27,7 +27,6 @@ use crate::raft::rpc::{
 use crate::raft::state::{
     LeaderState,
     LogIndex,
-    PersistentState, 
     Role, 
     ServerId, 
     Term, 
@@ -40,10 +39,12 @@ use crate::raft::state_machine::{
 };
 
 use crate::raft::storage::{
-    InMemoryStorage,
     PersistentMetadata,
     RaftStorage,
 };
+
+use std::fmt::Debug;
+use std::marker::PhantomData;
 
 /// A single Raft server.
 ///
@@ -65,6 +66,7 @@ use crate::raft::storage::{
 #[derive(Debug)]
 pub struct RaftNode<
     C,
+    St,
     S = NoopStateMachine,
 > {
     // My identity - id and role
@@ -73,7 +75,7 @@ pub struct RaftNode<
 
     // Each Raft server has some persistent state and other volatile
     // whom I voted, what was current term and logs are persitent
-    storage: InMemoryStorage<C>,
+    storage: St,
     // last applied and commit index are volalite
     volatile: VolatileState,
 
@@ -96,23 +98,27 @@ pub struct RaftNode<
 
     // The state machine receives committed commands in log order.
     state_machine: S,
+    _command: PhantomData<fn() -> C>,
 }
 
 /// Generic Raft Node with Any type having trait of State machine
-impl<C, S> RaftNode<C, S>
+impl<C, St, S> RaftNode<C, St, S>
 where 
+    St: RaftStorage<C>,
     S: StateMachine<C>,
+    St::Error: Debug,
 {
     // new construction with a state machine
-    pub fn with_state_machine(
+    pub fn with_storage(
         id: ServerId,
+        storage: St,
         state_machine: S,
     ) -> Self {
         Self {
             id,
             role: Role::Follower,
 
-            storage: InMemoryStorage::new(),
+            storage,
 
             volatile: VolatileState {
                 commit_index: LogIndex::ZERO,
@@ -126,6 +132,7 @@ where
             election_timer: ElectionTimer::new(5),
             heartbeat_timer: HeartbeatTimer::new(5),
             initial_heartbeat_pending: false,
+            _command: PhantomData,
         }
     }
 
@@ -1051,25 +1058,23 @@ where
         requests
     } 
 
-    pub fn from_persistent_state(
+    pub fn from_storage(
         id: ServerId,
-        persistent: PersistentState<RaftLog<C>>,
-        state_machine: S
+        storage: St,
+        state_machine: S,
     ) -> Self {
         Self {
-            id, 
+            id,
             role: Role::Follower,
-            storage:
-                InMemoryStorage::from_persistent_state(
-                    persistent,
-                ),
+            storage,
             volatile: VolatileState::new(),
             state_machine,
-            leader: None, 
-            election: None, 
+            leader: None,
+            election: None,
             election_timer: ElectionTimer::new(5),
             heartbeat_timer: HeartbeatTimer::new(5),
             initial_heartbeat_pending: false,
+            _command: PhantomData,
         }
     }
 
@@ -1122,17 +1127,21 @@ where
     // method is consuming the entire RaftNode
     // we want to take the ownership of its persistent state
     // we are moving this out of the node
-    pub fn into_persistent_state(
+    pub fn into_storage(
         self,
-    ) -> PersistentState<RaftLog<C>> {
-        self.storage.into_persistent_state()
+    ) -> St {
+        self.storage
     }
 
 }
 
 // Simplistic model of state machine where concrete type is fixed 
 // to NoopStateMachine
-impl<C> RaftNode<C, NoopStateMachine> {
+impl<C, St> RaftNode<C, St, NoopStateMachine>
+where
+    St: RaftStorage<C>,
+    St::Error: Debug,
+{
 
     /// Create a new Raft Server
     ///
@@ -1143,12 +1152,15 @@ impl<C> RaftNode<C, NoopStateMachine> {
     /// log, current_term and I've never voted any one
     /// 
     /// My volalite state is also at 0
-    pub fn new(id: ServerId) -> Self {
+    pub fn new(
+        id: ServerId,
+        storage: St,
+    ) -> Self {
         Self {
             id,
             role: Role::Follower,
 
-            storage: InMemoryStorage::new(),
+            storage,
 
             volatile: VolatileState {
                 commit_index: crate::raft::state::LogIndex::ZERO,
@@ -1161,6 +1173,7 @@ impl<C> RaftNode<C, NoopStateMachine> {
             heartbeat_timer: HeartbeatTimer::new(5), 
             state_machine: NoopStateMachine,
             initial_heartbeat_pending: false,
+            _command: PhantomData,
         }
     }
 }

@@ -1,8 +1,12 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+mod supports;
+#[path = "supports/state_machine.rs"]
+mod state_machine;
+
+use rustyraft::raft::storage::RaftStorage;
 use rustyraft::raft::{
-    RaftNode,
     Role,
     ServerId,
     LogIndex,
@@ -16,11 +20,21 @@ use rustyraft::raft::rpc::{
     AppendEntriesResponse,
 };
 
-use rustyraft::raft::state_machine::{NoopStateMachine, StateMachine};
+
+use supports::node::{
+    new_node,
+    new_node_with_state_machine,
+    restart_node,
+};
+
+use state_machine::{
+    new_failing_state_machine,
+    new_recording_state_machine,
+};
 
 #[test]
 fn request_vote_rejects_older_term() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -55,7 +69,7 @@ fn request_vote_rejects_older_term() {
 
 #[test]
 fn request_vote_updates_to_higher_term() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let request = RequestVoteRequest::new(
         Term::new(3),
@@ -73,7 +87,7 @@ fn request_vote_updates_to_higher_term() {
 
 #[test]
 fn request_vote_records_granted_vote() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let candidate = ServerId::new(2);
 
@@ -92,7 +106,7 @@ fn request_vote_records_granted_vote() {
 
 #[test]
 fn request_vote_rejects_different_candidate_after_voting() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let first_candidate = ServerId::new(2);
     let second_candidate = ServerId::new(3);
@@ -130,7 +144,7 @@ fn request_vote_rejects_different_candidate_after_voting() {
 
 #[test]
 fn request_vote_allows_same_candidate_again() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let candidate = ServerId::new(2);
 
@@ -159,7 +173,7 @@ fn request_vote_allows_same_candidate_again() {
 
 #[test]
 fn request_vote_rejects_candidate_with_older_log() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1)
     );
 
@@ -227,7 +241,7 @@ fn request_vote_rejects_candidate_with_older_log() {
 
 #[test]
 fn start_election_increments_term() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -241,7 +255,7 @@ fn start_election_increments_term() {
 
 #[test]
 fn start_election_makes_node_candidate() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -255,7 +269,7 @@ fn start_election_makes_node_candidate() {
 
 #[test]
 fn start_election_votes_for_self() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -269,7 +283,7 @@ fn start_election_votes_for_self() {
 
 #[test]
 fn start_election_creates_election_state() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -297,7 +311,7 @@ fn start_election_creates_election_state() {
 
 #[test]
 fn candidate_stays_candidate_without_majority() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -326,7 +340,7 @@ fn candidate_stays_candidate_without_majority() {
 
 #[test]
 fn candidate_becomes_leader_after_majority() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -359,7 +373,7 @@ fn candidate_becomes_leader_after_majority() {
 
 #[test]
 fn duplicate_vote_does_not_make_candidate_leader() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -388,7 +402,7 @@ fn duplicate_vote_does_not_make_candidate_leader() {
 
 #[test]
 fn higher_term_vote_response_makes_candidate_follower() {
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         ServerId::new(1),
     );
 
@@ -413,7 +427,7 @@ fn higher_term_vote_response_makes_candidate_follower() {
 
 #[test]
 fn follower_accepts_heartbeat() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let request = AppendEntriesRequest::heartbeat(
         Term::new(1),
@@ -433,7 +447,7 @@ fn follower_accepts_heartbeat() {
 
 #[test]
 fn follower_rejects_append_entries_from_older_term() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let newer_request = AppendEntriesRequest::heartbeat(
         Term::new(2),
@@ -462,7 +476,7 @@ fn follower_rejects_append_entries_from_older_term() {
 
 #[test]
 fn follower_updates_term_from_newer_append_entries() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let request = AppendEntriesRequest::heartbeat(
         Term::new(3),
@@ -481,7 +495,7 @@ fn follower_updates_term_from_newer_append_entries() {
 
 #[test]
 fn follower_rejects_missing_previous_log_entry() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let request = AppendEntriesRequest::new(
         Term::new(1),
@@ -500,7 +514,7 @@ fn follower_rejects_missing_previous_log_entry() {
 
 #[test]
 fn follower_appends_new_entries() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let entries = vec![
         LogEntry::new(Term::new(1), "A".to_string()),
@@ -537,7 +551,7 @@ fn follower_appends_new_entries() {
 
 #[test]
 fn follower_replaces_conflicting_log_entries() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     // First create the follower's existing log:
     //
@@ -615,7 +629,7 @@ fn follower_replaces_conflicting_log_entries() {
 
 #[test]
 fn follower_advances_commit_index_from_leader() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let entries = vec![
         LogEntry::new(Term::new(1), "A".to_string()),
@@ -642,7 +656,7 @@ fn follower_advances_commit_index_from_leader() {
 
 #[test]
 fn follower_does_not_commit_beyond_local_log() {
-    let mut node = RaftNode::<String>::new(ServerId::new(1));
+    let mut node = new_node(ServerId::new(1));
 
     let entries = vec![
         LogEntry::new(Term::new(1), "A".to_string()),
@@ -674,7 +688,7 @@ fn leader_builds_append_entries_for_follower() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     // Start a real election rather than bypassing the election state.
     leader.start_election();
@@ -734,7 +748,7 @@ fn leader_builds_append_entries_with_log_entries() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     leader.start_election();
 
@@ -803,8 +817,8 @@ fn leader_and_follower_complete_log_replication_round() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -875,8 +889,8 @@ fn leader_backs_up_next_index_when_follower_is_missing_index() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     leader.start_election();
 
@@ -990,8 +1004,8 @@ fn leader_retries_append_entries_after_failure() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     // Elect the leader while both logs are empty.
     leader.start_election();
@@ -1170,8 +1184,8 @@ fn leader_advances_commit_index_after_majority_replication() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -1226,7 +1240,7 @@ fn leader_does_not_advance_commit_index_without_majority() {
     let follower_a = ServerId::new(2);
     let follower_b = ServerId::new(3);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     // Elect the leader. Give it one vote from each follower so that
     // the election is complete.
@@ -1258,8 +1272,8 @@ fn leader_commits_entry_after_replicating_to_follower() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -1315,8 +1329,8 @@ fn follower_advances_commit_index_from_leader_commit() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -1363,8 +1377,8 @@ fn follower_does_not_commit_past_local_log() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     leader.start_election();
 
@@ -1407,8 +1421,8 @@ fn follower_commit_index_never_moves_backward() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     leader.start_election();
 
@@ -1460,7 +1474,7 @@ fn leader_commit_index_never_moves_backward() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     leader.start_election();
 
@@ -1504,7 +1518,7 @@ fn leader_does_not_commit_older_term_entry_directly() {
     let follower_a = ServerId::new(2);
     let follower_b = ServerId::new(3);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     // Term 1.
     leader.start_election();
@@ -1564,83 +1578,19 @@ fn leader_does_not_commit_older_term_entry_directly() {
     );
 }
 
-struct RecordingStateMachine {
-    applied: std::rc::Rc<
-        std::cell::RefCell<Vec<String>>
-    >,
-}
-
-impl RecordingStateMachine {
-    fn new(
-        applied: std::rc::Rc<
-            std::cell::RefCell<Vec<String>>
-        >,
-    ) -> Self {
-        Self {
-            applied,
-        }
-    }
-}
-
-impl StateMachine<String> for RecordingStateMachine {
-    type Error = ();
-
-    fn apply(
-        &mut self,
-        command: &String,
-    ) -> Result<(), Self::Error> {
-        self
-            .applied
-            .borrow_mut()
-            .push(command.clone());
-
-        Ok(())
-    }
-}
-
-struct FailingStateMachine {
-    applied: Vec<String>,
-}
-
-impl FailingStateMachine {
-    fn new() -> Self {
-        Self {
-            applied: Vec::new(),
-        }
-    }
-}
-
-impl StateMachine<String> for FailingStateMachine {
-    type Error = &'static str;
-
-    fn apply(
-        &mut self,
-        command: &String,
-    ) -> Result<(), Self::Error> {
-        self.applied.push(command.clone());
-
-        if command == "B" {
-            return Err("failed to apply B");
-        }
-
-        Ok(())
-    }
-}
-
-
 #[test]
 fn last_applied_does_not_advance_when_application_fails() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let state_machine = FailingStateMachine::new();
+    let state_machine = new_failing_state_machine();
 
-    let mut leader = RaftNode::with_state_machine(
+    let mut leader = new_node_with_state_machine(
         leader_id,
         state_machine,
     );
 
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut follower = new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -1740,7 +1690,7 @@ fn last_applied_does_not_advance_when_application_fails() {
 fn follower_starts_election_when_election_timer_expires() {
     let server_id = ServerId::new(1);
 
-    let mut node = RaftNode::<String>::new(server_id);
+    let mut node = new_node(server_id);
 
     assert_eq!(
         node.role(),
@@ -1766,7 +1716,7 @@ fn follower_starts_election_when_election_timer_expires() {
 fn follower_does_not_start_election_before_timeout() {
     let server_id = ServerId::new(1);
 
-    let mut node = RaftNode::<String>::new(server_id);
+    let mut node = new_node(server_id);
 
     for _ in 0..4 {
         node.tick();
@@ -1788,7 +1738,7 @@ fn append_entries_resets_follower_election_timer() {
     let server_id = ServerId::new(1);
     let leader_id = ServerId::new(2);
 
-    let mut node = RaftNode::<String>::new(server_id);
+    let mut node = new_node(server_id);
 
     for _ in 0..4 {
         node.tick();
@@ -1820,7 +1770,7 @@ fn append_entries_resets_follower_election_timer() {
 fn candidate_starts_another_election_after_timeout() {
     let server_id = ServerId::new(1);
 
-    let mut node = RaftNode::<String>::new(server_id);
+    let mut node = new_node(server_id);
 
     // First timeout starts the first election.
     for _ in 0..5 {
@@ -1859,7 +1809,7 @@ fn candidate_starts_another_election_after_timeout() {
 fn starting_another_election_increments_term_again() {
     let server_id = ServerId::new(1);
 
-    let mut node = RaftNode::<String>::new(server_id);
+    let mut node = new_node(server_id);
 
     for expected_term in 1..=3 {
         for _ in 0..5 {
@@ -1882,7 +1832,7 @@ fn starting_another_election_increments_term_again() {
 fn candidate_does_not_start_another_election_before_timeout() {
     let server_id = ServerId::new(1);
 
-    let mut node = RaftNode::<String>::new(server_id);
+    let mut node = new_node(server_id);
 
     // First election.
     for _ in 0..5 {
@@ -1921,7 +1871,7 @@ fn candidate_steps_down_when_valid_append_entries_arrives() {
     let server_id = ServerId::new(1);
     let leader_id = ServerId::new(2);
 
-    let mut node = RaftNode::<String>::new(server_id);
+    let mut node = new_node(server_id);
 
     // Become candidate.
     for _ in 0..5 {
@@ -1970,7 +1920,7 @@ fn leader_does_not_generate_second_heartbeat_before_interval() {
     let follower_id = ServerId::new(2);
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     leader.start_election();
 
@@ -2040,7 +1990,7 @@ fn leader_generates_heartbeat_for_each_follower() {
     ];
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     leader.start_election();
 
@@ -2100,10 +2050,10 @@ fn heartbeat_reaches_follower_and_resets_election_timer() {
     ];
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     let mut follower =
-        RaftNode::<String>::new(follower_id);
+        new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -2183,10 +2133,10 @@ fn successful_heartbeat_does_not_advance_match_index() {
     ];
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     let mut follower =
-        RaftNode::<String>::new(follower_id);
+        new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -2289,7 +2239,7 @@ fn leader_generates_heartbeat_again_after_next_interval() {
     ];
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     leader.start_election();
 
@@ -2357,7 +2307,7 @@ fn node_restart_preserves_persistent_state() {
     let server_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut node = RaftNode::<String>::new(server_id);
+    let mut node = new_node(server_id);
 
     // Start a real election.
     node.start_election();
@@ -2392,29 +2342,28 @@ fn node_restart_preserves_persistent_state() {
     );
 
     // Move the persistent state out of the failed node.
-    let persistent = node.into_persistent_state();
+    let storage = node.into_storage();
 
     assert_eq!(
-        persistent.current_term,
-        Term::new(1)
+        storage.current_term(),
+        Ok(Term::new(1))
     );
 
     assert_eq!(
-        persistent.voted_for,
-        Some(server_id)
+        storage.voted_for(),
+        Ok(Some(server_id))
     );
 
     assert_eq!(
-        persistent.log.last_index(),
+        storage.log().last_index(),
         LogIndex::new(2)
     );
 
     // Recreate the node from persisted state.
     let restarted =
-        RaftNode::from_persistent_state(
+        restart_node(
             server_id,
-            persistent,
-            NoopStateMachine,
+            storage,
         );
 
     assert_eq!(
@@ -2455,10 +2404,10 @@ fn follower_restart_continues_log_replication() {
     let follower_id = ServerId::new(2);
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     let mut follower =
-        RaftNode::<String>::new(follower_id);
+        new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -2543,20 +2492,19 @@ fn follower_restart_continues_log_replication() {
     );
 
     // The follower crashes. Only persistent state survives.
-    let persistent =
-        follower.into_persistent_state();
+    let storage =
+        follower.into_storage();
 
     assert_eq!(
-        persistent.log.last_index(),
+        storage.log().last_index(),
         LogIndex::new(2)
     );
 
     // Restart the follower from persisted state.
     let mut follower =
-        RaftNode::from_persistent_state(
+        restart_node(
             follower_id,
-            persistent,
-            NoopStateMachine,
+            storage,
         );
 
     assert_eq!(
@@ -2618,7 +2566,7 @@ fn follower_restart_continues_log_replication() {
 #[test]
 fn request_vote_grants_candidate_with_newer_log_term() {
     let mut node =
-        RaftNode::<String>::new(
+        new_node(
             ServerId::new(1)
         );
 
@@ -2693,7 +2641,7 @@ fn request_vote_grants_candidate_with_newer_log_term() {
 #[test]
 fn request_vote_rejects_candidate_with_shorter_log_same_term() {
     let mut node =
-        RaftNode::<String>::new(
+        new_node(
             ServerId::new(1)
         );
 
@@ -2771,10 +2719,10 @@ fn leader_retries_and_reconciles_follower_after_failure() {
     let follower_id = ServerId::new(2);
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     let mut follower =
-        RaftNode::<String>::new(follower_id);
+        new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -2991,20 +2939,17 @@ fn leader_retries_and_reconciles_follower_after_failure() {
 /// to the state machine in log order.
 #[test]
 fn apply_committed_entries_applies_commands_in_order() {
-    let applied =
-        std::rc::Rc::new(
-            std::cell::RefCell::new(
-                Vec::new()
-            )
-        );
+    let recording =
+        new_recording_state_machine();
 
-    let state_machine =
-        RecordingStateMachine::new(
-            std::rc::Rc::clone(&applied)
-        );
+    let state_machine = recording.0;
+
+    let applied: Rc<
+        RefCell<Vec<String>>
+    > = recording.1;
 
     let mut node =
-        RaftNode::with_state_machine(
+        new_node_with_state_machine(
             ServerId::new(1),
             state_machine,
         );
@@ -3064,17 +3009,22 @@ fn apply_committed_entries_applies_commands_in_order() {
 }
 
 /// Verifies that a follower applies newly committed entries in order.
+/// Verifies that a follower applies newly committed entries in order.
 #[test]
 fn follower_applies_committed_entries_in_order() {
-    let applied = Rc::new(RefCell::new(Vec::new()));
+    let recording =
+        new_recording_state_machine();
 
-    let state_machine =
-        RecordingStateMachine::new(Rc::clone(&applied));
+    let state_machine = recording.0;
+
+    let applied: Rc<
+        RefCell<Vec<String>>
+    > = recording.1;
 
     let follower_id = ServerId::new(1);
     let leader_id = ServerId::new(2);
 
-    let mut follower = RaftNode::with_state_machine(
+    let mut follower = new_node_with_state_machine(
         follower_id,
         state_machine,
     );
@@ -3103,7 +3053,8 @@ fn follower_applies_committed_entries_in_order() {
         LogIndex::new(2),
     );
 
-    let response = follower.handle_append_entries(request);
+    let response =
+        follower.handle_append_entries(request);
 
     assert!(response.success);
 
@@ -3135,7 +3086,8 @@ fn follower_applies_committed_entries_in_order() {
         LogIndex::new(2),
     );
 
-    let response = follower.handle_append_entries(request);
+    let response =
+        follower.handle_append_entries(request);
 
     assert!(response.success);
 
@@ -3161,7 +3113,7 @@ fn stale_append_entries_does_not_reset_election_timer() {
     let old_leader_id = ServerId::new(2);
     let current_leader_id = ServerId::new(3);
 
-    let mut node = RaftNode::<String>::new(
+    let mut node = new_node(
         server_id
     );
 
@@ -3234,7 +3186,7 @@ fn granting_vote_resets_election_timer() {
     let candidate_id = ServerId::new(2);
 
     let mut node =
-        RaftNode::<String>::new(server_id);
+        new_node(server_id);
 
     // Move close to the election timeout.
     for _ in 0..4 {
@@ -3297,7 +3249,7 @@ fn candidate_steps_down_on_current_term_append_entries() {
     let leader_id = ServerId::new(2);
 
     let mut node =
-        RaftNode::<String>::new(candidate_id);
+        new_node(candidate_id);
 
     // Start an election.
     node.start_election();
@@ -3374,7 +3326,7 @@ fn initial_heartbeat_is_followed_by_normal_heartbeat_interval() {
     ];
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     leader.start_election();
 
@@ -3437,10 +3389,10 @@ fn leader_commits_command_after_majority_replication() {
     let follower_b = ServerId::new(3);
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     let mut follower =
-        RaftNode::<String>::new(follower_a);
+        new_node(follower_a);
 
     // Elect node 1.
     leader.start_election();
@@ -3554,7 +3506,7 @@ fn leader_does_not_commit_without_majority() {
     let follower_b = ServerId::new(3);
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     // Elect node 1.
     leader.start_election();

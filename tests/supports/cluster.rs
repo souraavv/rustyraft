@@ -11,15 +11,23 @@ use rustyraft::raft::transport::{
     InMemoryTransport, RaftMessage, RaftMessagePayload,
 };
 
+use super::node::{
+    new_test_storage,
+    TestStorage,
+};
+
 
 use rustyraft::raft::rpc::{
     RequestVoteRequest, RequestVoteResponse,
 };
 
 
-pub struct TestCluster<C> {
-    nodes: HashMap<ServerId, RaftNode<C>>,
-    transport: InMemoryTransport<C>,
+pub struct TestCluster {
+    nodes: HashMap<
+        ServerId,
+        RaftNode<String, TestStorage>,
+    >,
+    transport: InMemoryTransport<String>,
 }
 
 pub struct MessageDelivery {
@@ -27,7 +35,7 @@ pub struct MessageDelivery {
     pub to: ServerId,
 }
 
-impl<C> TestCluster<C> {
+impl TestCluster {
     pub fn new(
         server_ids: &[ServerId],
     ) -> Self {
@@ -37,7 +45,10 @@ impl<C> TestCluster<C> {
             .map(|server_id| {
                 (
                     server_id,
-                    RaftNode::new(server_id),
+                    RaftNode::new(
+                        server_id,
+                        new_test_storage(),
+                    ),
                 )
             })
             .collect();
@@ -50,29 +61,29 @@ impl<C> TestCluster<C> {
 }
 
 
-impl<C> TestCluster<C> {
+impl TestCluster {
     pub fn node(
         &self,
         server_id: ServerId,
-    ) -> Option<&RaftNode<C>> {
+    ) -> Option<&RaftNode<String, TestStorage>> {
         self.nodes.get(&server_id)
     }
 
     pub fn node_mut(
         &mut self,
         server_id: ServerId,
-    ) -> Option<&mut RaftNode<C>> {
+    ) -> Option<&mut RaftNode<String, TestStorage>> {
         self.nodes.get_mut(&server_id)
     }
 
     pub fn transport(
         &mut self,
-    ) -> &mut InMemoryTransport<C> {
+    ) -> &mut InMemoryTransport<String> {
         &mut self.transport
     }
 }
 
-impl <C: Clone> TestCluster<C> {
+impl TestCluster {
 
     pub fn start_election(
         &mut self,
@@ -110,7 +121,7 @@ impl <C: Clone> TestCluster<C> {
             let message = RaftMessage::new(
                 candidate_id,
                 server_id,
-                RaftMessagePayload::<C>::RequestVote(
+                RaftMessagePayload::<String>::RequestVote(
                     request,
                 ),
             );
@@ -179,7 +190,7 @@ impl <C: Clone> TestCluster<C> {
             RaftMessage::new(
                 leader_id,
                 follower_id,
-                RaftMessagePayload::<C>::AppendEntries(
+                RaftMessagePayload::<String>::AppendEntries(
                     request,
                 ),
             ),
@@ -190,7 +201,7 @@ impl <C: Clone> TestCluster<C> {
 
     fn deliver_message(
         &mut self,
-        message: RaftMessage<C>,
+        message: RaftMessage<String>,
     ) -> MessageDelivery {
         let from = message.from;
         let to = message.to;
@@ -224,7 +235,7 @@ impl <C: Clone> TestCluster<C> {
                         RaftMessage::new(
                             to,
                             from,
-                            RaftMessagePayload::<C>::RequestVoteResponse(
+                            RaftMessagePayload::<String>::RequestVoteResponse(
                                 response,
                             ),
                         ),
@@ -260,7 +271,7 @@ impl <C: Clone> TestCluster<C> {
                         RaftMessage::new(
                             to,
                             from,
-                            RaftMessagePayload::<C>::AppendEntriesResponse(
+                            RaftMessagePayload::<String>::AppendEntriesResponse(
                                 response,
                             ),
                         ),
@@ -347,7 +358,7 @@ impl <C: Clone> TestCluster<C> {
                     RaftMessage::new(
                         server_id,
                         peer_id,
-                        RaftMessagePayload::<C>::RequestVote(
+                        RaftMessagePayload::<String>::RequestVote(
                             request,
                         ),
                     ),
@@ -374,7 +385,7 @@ impl <C: Clone> TestCluster<C> {
                 RaftMessage::new(
                     server_id,
                     follower_id,
-                    RaftMessagePayload::<C>::AppendEntries(
+                    RaftMessagePayload::<String>::AppendEntries(
                         request,
                     ),
                 ),

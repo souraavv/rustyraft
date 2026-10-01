@@ -15,7 +15,7 @@ fn cluster_creates_all_nodes() {
     ];
 
     let cluster =
-        TestCluster::<String>::new(
+        TestCluster::new(
             &server_ids,
         );
 
@@ -49,7 +49,7 @@ fn starting_election_queues_request_vote_messages() {
         ServerId::new(1);
 
     let mut cluster =
-        TestCluster::<String>::new(
+        TestCluster::new(
             &server_ids,
         );
 
@@ -86,7 +86,7 @@ fn cluster_delivers_request_vote() {
         ServerId::new(2);
 
     let mut cluster =
-        TestCluster::<String>::new(
+        TestCluster::new(
             &server_ids,
         );
 
@@ -134,7 +134,7 @@ fn request_vote_round_trip_reaches_candidate() {
         ServerId::new(2);
 
     let mut cluster =
-        TestCluster::<String>::new(
+        TestCluster::new(
             &server_ids,
         );
 
@@ -195,7 +195,7 @@ fn append_entries_round_trip_uses_transport() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(
+        TestCluster::new(
             &server_ids,
         );
 
@@ -347,7 +347,7 @@ fn append_entries_can_be_retried_after_drop() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(
+        TestCluster::new(
             &server_ids,
         );
 
@@ -512,7 +512,7 @@ fn reordered_append_entries_does_not_move_progress_backward() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(
+        TestCluster::new(
             &server_ids,
         );
 
@@ -735,7 +735,7 @@ fn duplicate_append_entries_does_not_duplicate_log_entries() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(
+        TestCluster::new(
             &server_ids,
         );
 
@@ -885,7 +885,7 @@ fn three_node_cluster_commits_command_after_majority_replication() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(&server_ids);
+        TestCluster::new(&server_ids);
 
     // Start an election on node 1.
     cluster.start_election(leader_id);
@@ -995,7 +995,7 @@ fn three_node_cluster_does_not_commit_without_majority() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(&server_ids);
+        TestCluster::new(&server_ids);
 
     cluster.start_election(leader_id);
 
@@ -1059,7 +1059,7 @@ fn cluster_retries_dropped_append_entries() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(&server_ids);
+        TestCluster::new(&server_ids);
 
     // Elect the leader.
     cluster.start_election(leader_id);
@@ -1185,7 +1185,7 @@ fn cluster_elects_leader_after_election_timeout() {
     let follower_a = ServerId::new(2);
     let follower_b = ServerId::new(3);
 
-    let mut cluster = TestCluster::<String>::new(&[
+    let mut cluster = TestCluster::new(&[
         candidate_id,
         follower_a,
         follower_b,
@@ -1305,7 +1305,7 @@ fn cluster_step_delivers_leader_heartbeat() {
     let follower_a = ServerId::new(2);
     let follower_b = ServerId::new(3);
 
-    let mut cluster = TestCluster::<String>::new(&[
+    let mut cluster = TestCluster::new(&[
         leader_id,
         follower_a,
         follower_b,
@@ -1388,7 +1388,7 @@ fn cluster_heartbeat_prevents_follower_election() {
     let follower_a = ServerId::new(2);
     let follower_b = ServerId::new(3);
 
-    let mut cluster = TestCluster::<String>::new(&[
+    let mut cluster = TestCluster::new(&[
         leader_id,
         follower_a,
         follower_b,
@@ -1491,7 +1491,7 @@ fn cluster_replicates_command_and_commits_to_majority() {
     let follower_a = ServerId::new(2);
     let follower_b = ServerId::new(3);
 
-    let mut cluster = TestCluster::<String>::new(&[
+    let mut cluster = TestCluster::new(&[
         leader_id,
         follower_a,
         follower_b,
@@ -1605,7 +1605,7 @@ fn cluster_commits_command_with_one_follower_unavailable() {
     let follower_a = ServerId::new(2);
     let follower_b = ServerId::new(3);
 
-    let mut cluster = TestCluster::<String>::new(&[
+    let mut cluster = TestCluster::new(&[
         leader_id,
         follower_a,
         follower_b,
@@ -1695,7 +1695,7 @@ fn cluster_follower_starts_election_without_heartbeat() {
     let follower_id = ServerId::new(2);
     let other_follower = ServerId::new(3);
 
-    let mut cluster = TestCluster::<String>::new(&[
+    let mut cluster = TestCluster::new(&[
         leader_id,
         follower_id,
         other_follower,

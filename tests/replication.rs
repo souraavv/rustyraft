@@ -1,3 +1,10 @@
+mod supports;
+
+use supports::node::{
+    new_node,
+    new_node_with_log,
+};
+
 use rustyraft::raft::replication::{
     FollowerProgress,
     ReplicationState,
@@ -6,9 +13,7 @@ use rustyraft::raft::replication::{
 use rustyraft::raft::{
     LogEntry, LogIndex, RaftLog, RaftNode, Role, ServerId, Term,
 };
-use rustyraft::raft::state::PersistentState;
 use rustyraft::raft::rpc::{AppendEntriesResponse, RequestVoteResponse};
-use rustyraft::raft::state_machine::NoopStateMachine;
 
 #[test]
 fn follower_progress_starts_at_given_next_index() {
@@ -534,8 +539,8 @@ fn conflicting_follower_log_is_repaired_after_retry() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
-    let mut follower = RaftNode::<String>::new(follower_id);
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
     // Elect the leader in term 1.
     leader.start_election();
@@ -695,39 +700,23 @@ fn conflicting_follower_log_is_repaired_after_retry() {
     //   index:  1   2   3
     //   term:   1   1   1
     //   command A   B   X
-    let mut conflicting_log = RaftLog::new();
-
-    conflicting_log.append(
-        LogEntry::new(
-            Term::new(1),
-            "A".to_string(),
-        ),
-    );
-
-    conflicting_log.append(
-        LogEntry::new(
-            Term::new(1),
-            "B".to_string(),
-        ),
-    );
-
-    conflicting_log.append(
-        LogEntry::new(
-            Term::new(1),
-            "X".to_string(),
-        ),
-    );
-
-    let conflicting_state = PersistentState::new(
-        Term::new(2),
-        None,
-        conflicting_log,
-    );
-
-    follower = RaftNode::from_persistent_state(
+    follower = new_node_with_log(
         follower_id,
-        conflicting_state,
-        NoopStateMachine,
+        Term::new(2),
+        vec![
+            LogEntry::new(
+                Term::new(1),
+                "A".to_string(),
+            ),
+            LogEntry::new(
+                Term::new(1),
+                "B".to_string(),
+            ),
+            LogEntry::new(
+                Term::new(1),
+                "X".to_string(),
+            ),
+        ],
     );
 
     // Verify the follower starts with the conflicting entry.
@@ -898,7 +887,7 @@ fn leader_steps_down_on_newer_term_append_entries_response() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     // Elect the leader in term 1.
     leader.start_election();
@@ -970,7 +959,7 @@ fn leader_ignores_older_term_append_entries_response() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     // Elect the leader in term 1.
     leader.start_election();
@@ -1088,7 +1077,7 @@ fn stale_success_response_does_not_move_progress_backward() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     // Elect the leader in term 1.
     leader.start_election();
@@ -1215,7 +1204,7 @@ fn success_response_without_replicated_index_does_not_advance_progress() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader = RaftNode::<String>::new(leader_id);
+    let mut leader = new_node(leader_id);
 
     // Elect the leader in term 1.
     leader.start_election();

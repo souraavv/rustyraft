@@ -67,7 +67,7 @@ fn storage_preserves_metadata_and_log() {
 
     assert_eq!(
         storage
-            .log_entry(second_index)
+            .log_at(second_index)
             .unwrap()
             .map(|entry| entry.command),
         Some(String::from("B")),
@@ -101,7 +101,7 @@ fn storage_starts_empty() {
     );
     assert!(
         storage
-            .log_entry(LogIndex::new(1))
+            .log_at(LogIndex::new(1))
             .unwrap()
             .is_none()
     );
@@ -313,7 +313,7 @@ fn storage_appends_after_log_truncation() {
 
     assert_eq!(
         storage
-            .log_entry(LogIndex::new(2))
+            .log_at(LogIndex::new(2))
             .unwrap()
             .map(|entry| entry.command),
         Some(String::from("C")),

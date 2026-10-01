@@ -307,7 +307,7 @@ fn cluster_commits_after_majority_replication_with_dropped_follower() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(&server_ids);
+        TestCluster::new(&server_ids);
 
     // Elect the leader.
     cluster.start_election(leader_id);
@@ -429,7 +429,7 @@ fn cluster_does_not_commit_without_majority() {
     ];
 
     let mut cluster =
-        TestCluster::<String>::new(&server_ids);
+        TestCluster::new(&server_ids);
 
     // Elect the leader.
     cluster.start_election(leader_id);

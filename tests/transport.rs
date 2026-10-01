@@ -1,6 +1,9 @@
+mod supports;
+
+use supports::node::new_node;
+
 use rustyraft::raft::{
     LogIndex,
-    RaftNode,
     Role,
     ServerId,
     Term,
@@ -244,10 +247,10 @@ fn transport_delivers_append_entries_to_follower() {
     ];
 
     let mut leader =
-        RaftNode::<String>::new(leader_id);
+        new_node(leader_id);
 
     let mut follower =
-        RaftNode::<String>::new(follower_id);
+        new_node(follower_id);
 
     // Elect the leader.
     leader.start_election();
@@ -357,10 +360,10 @@ fn transport_delivers_request_vote_to_follower() {
     ];
 
     let mut candidate =
-        RaftNode::<String>::new(candidate_id);
+        new_node(candidate_id);
 
     let mut follower =
-        RaftNode::<String>::new(follower_id);
+        new_node(follower_id);
 
     candidate.start_election();
 
