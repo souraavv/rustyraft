@@ -2,7 +2,13 @@ use rustyraft::raft::commit::find_commit_index;
 use rustyraft::raft::{
     LogIndex,
     Term,
+    ServerId,
 };
+
+mod supports;
+
+use supports::cluster::TestCluster;
+
 
 fn term_at(
     entries: &[(u64, u64)],
@@ -286,3 +292,240 @@ fn commit_index_never_moves_backward() {
     );
 }
 
+
+/// Verifies a command commits when one follower is unavailable.
+#[test]
+fn cluster_commits_after_majority_replication_with_dropped_follower() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
+    ];
+
+    let mut cluster =
+        TestCluster::<String>::new(&server_ids);
+
+    // Elect the leader.
+    cluster.start_election(leader_id);
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive RequestVote");
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive RequestVote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        rustyraft::raft::Role::Leader
+    );
+
+    // Append the command to the leader.
+    let index = cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    assert_eq!(
+        index,
+        LogIndex::new(1)
+    );
+
+    // Queue replication to both followers.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
+
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_b
+        )
+    );
+
+    // Lose the message to follower B.
+    assert!(
+        cluster.drop_to(follower_b)
+    );
+
+    // Follower A receives and replicates the command.
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive AppendEntries");
+
+    // Its successful response reaches the leader.
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive replication response");
+
+    // Leader + follower A = 2/3.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1)
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .last_applied(),
+        LogIndex::new(1)
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1)
+    );
+
+    // Follower B never received the command.
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log()
+            .last_index(),
+        LogIndex::ZERO
+    );
+}
+
+/// Verifies a command remains uncommitted without a majority.
+#[test]
+fn cluster_does_not_commit_without_majority() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
+    ];
+
+    let mut cluster =
+        TestCluster::<String>::new(&server_ids);
+
+    // Elect the leader.
+    cluster.start_election(leader_id);
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive RequestVote");
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive RequestVote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        rustyraft::raft::Role::Leader
+    );
+
+    // Append the command only to the leader.
+    let index = cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    assert_eq!(
+        index,
+        LogIndex::new(1)
+    );
+
+    // Queue replication to both followers.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
+
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_b
+        )
+    );
+
+    // Lose both replication messages.
+    assert!(
+        cluster.drop_to(follower_a)
+    );
+
+    assert!(
+        cluster.drop_to(follower_b)
+    );
+
+    // Only the leader has the entry: 1/3 is not a majority.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::ZERO
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .last_applied(),
+        LogIndex::ZERO
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should exist")
+            .log()
+            .last_index(),
+        LogIndex::ZERO
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log()
+            .last_index(),
+        LogIndex::ZERO
+    );
+}
