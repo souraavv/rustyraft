@@ -1177,3 +1177,602 @@ fn cluster_retries_dropped_append_entries() {
         LogIndex::new(1)
     );
 }
+
+/// Verifies an election can be driven entirely by logical time.
+#[test]
+fn cluster_elects_leader_after_election_timeout() {
+    let candidate_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut cluster = TestCluster::<String>::new(&[
+        candidate_id,
+        follower_a,
+        follower_b,
+    ]);
+
+    // Tick only the candidate so the other nodes do not
+    // start competing elections.
+    for _ in 0..4 {
+        cluster.tick(candidate_id);
+
+        assert_eq!(
+            cluster.transport().pending_count(),
+            0,
+        );
+    }
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("candidate should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    // The fifth tick expires the election timer.
+    cluster.tick(candidate_id);
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("candidate should exist")
+            .role(),
+        Role::Candidate,
+    );
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("candidate should exist")
+            .current_term()
+            .value(),
+        1,
+    );
+
+    // The candidate sends one RequestVote RPC to each follower.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+
+    // Deliver both RequestVote RPCs.
+    cluster
+        .deliver_next()
+        .expect("first RequestVote should exist");
+
+    cluster
+        .deliver_next()
+        .expect("second RequestVote should exist");
+
+    // Both followers have now sent their vote responses.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+
+    // The candidate already has its own vote.
+    // One additional granted vote gives it a majority of 2/3.
+    cluster
+        .deliver_next()
+        .expect("first vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("leader should exist")
+            .current_term()
+            .value(),
+        1,
+    );
+
+    // The remaining vote response may still arrive after the node
+    // has become leader. It must not change the leader's state.
+    cluster
+        .deliver_next()
+        .expect("second vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // The new leader's initial heartbeat is generated on its next
+    // logical tick.
+    cluster.tick(candidate_id);
+
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+}
+
+/// Verifies step drives a leader heartbeat through the transport.
+#[test]
+fn cluster_step_delivers_leader_heartbeat() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut cluster = TestCluster::<String>::new(&[
+        leader_id,
+        follower_a,
+        follower_b,
+    ]);
+
+    // Start a real election through the transport.
+    cluster.start_election(leader_id);
+
+    // Deliver both RequestVote RPCs.
+    cluster
+        .deliver_next()
+        .expect("first RequestVote should exist");
+
+    cluster
+        .deliver_next()
+        .expect("second RequestVote should exist");
+
+    // Deliver both vote responses.
+    //
+    // The first response gives the candidate a majority because
+    // it already voted for itself.
+    cluster
+        .deliver_next()
+        .expect("first vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    cluster
+        .deliver_next()
+        .expect("second vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // The transport should now be idle.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        0,
+    );
+
+    // step() advances the leader and delivers one generated
+    // heartbeat through the transport.
+    let delivery = cluster
+        .step(leader_id)
+        .expect("leader should send a heartbeat");
+
+    assert_eq!(
+        delivery.from,
+        leader_id,
+    );
+
+    assert_ne!(
+        delivery.to,
+        leader_id,
+    );
+
+    // Delivering the heartbeat immediately generated a response
+    // from the follower. The other heartbeat is still pending.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+}
+
+/// Verifies a delivered leader heartbeat prevents a follower election.
+#[test]
+fn cluster_heartbeat_prevents_follower_election() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut cluster = TestCluster::<String>::new(&[
+        leader_id,
+        follower_a,
+        follower_b,
+    ]);
+
+    // Start a real election through the cluster transport.
+    cluster.start_election(leader_id);
+
+    // Deliver both RequestVote RPCs.
+    cluster
+        .deliver_next()
+        .expect("first RequestVote should exist");
+
+    cluster
+        .deliver_next()
+        .expect("second RequestVote should exist");
+
+    // Deliver the first vote response. The candidate already
+    // voted for itself, so this gives it a majority.
+    cluster
+        .deliver_next()
+        .expect("first vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // Deliver the remaining vote response.
+    cluster
+        .deliver_next()
+        .expect("second vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // Drive the leader once. This generates and delivers one
+    // initial heartbeat to a follower.
+    let delivery = cluster
+        .step(leader_id)
+        .expect("leader should send a heartbeat");
+
+    assert_eq!(
+        delivery.from,
+        leader_id,
+    );
+
+    let follower_id = delivery.to;
+
+    assert_ne!(
+        follower_id,
+        leader_id,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    // The heartbeat reset the follower's election timer.
+    // Four more ticks must not start an election.
+    for _ in 0..4 {
+        cluster.tick(follower_id);
+    }
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .current_term()
+            .value(),
+        1,
+    );
+}
+
+
+/// Verifies a client command is replicated and committed on a majority.
+#[test]
+fn cluster_replicates_command_and_commits_to_majority() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut cluster = TestCluster::<String>::new(&[
+        leader_id,
+        follower_a,
+        follower_b,
+    ]);
+
+    // Elect the leader through real RequestVote RPCs.
+    cluster.start_election(leader_id);
+
+    for _ in 0..4 {
+        cluster
+            .deliver_next()
+            .expect("election message should exist");
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // Append a client command to the elected leader.
+    let index = cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    assert_eq!(
+        index,
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::ZERO,
+    );
+
+    // step() advances the leader and delivers one AppendEntries RPC.
+    cluster
+        .step(leader_id)
+        .expect("leader should send AppendEntries");
+
+    // Process the remaining replication and response messages.
+    for _ in 0..4 {
+        if cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index()
+            == LogIndex::new(1)
+        {
+            break;
+        }
+
+        cluster
+            .deliver_next()
+            .expect("replication message should exist");
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .last_applied(),
+        LogIndex::new(1),
+    );
+
+    // Drain the remaining replication messages.
+    while cluster.transport().has_pending() {
+        cluster
+            .deliver_next()
+            .expect("pending replication message should exist");
+    }
+
+    // Both followers should eventually receive the command.
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1),
+    );
+}
+
+/// Verifies a leader commits when one follower is unreachable.
+#[test]
+fn cluster_commits_command_with_one_follower_unavailable() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut cluster = TestCluster::<String>::new(&[
+        leader_id,
+        follower_a,
+        follower_b,
+    ]);
+
+    // Elect the leader.
+    cluster.start_election(leader_id);
+
+    for _ in 0..4 {
+        cluster
+            .deliver_next()
+            .expect("election message should exist");
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // Append a command to the leader.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    // Generate AppendEntries for both followers.
+    cluster.tick(leader_id);
+
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+
+    // Drop every message currently destined for follower B.
+    assert!(
+        cluster.drop_to(follower_b),
+        "follower B should have a pending message"
+    );
+
+    // The remaining AppendEntries goes to follower A.
+    cluster
+        .deliver_next()
+        .expect("replication should reach follower A");
+
+    // Follower A sends the successful response back to the leader.
+    cluster
+        .deliver_next()
+        .expect("leader should receive replication response");
+
+    // Leader + follower A = 2/3, which is a majority.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1),
+    );
+
+    // Follower B never received the command.
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log()
+            .last_index(),
+        LogIndex::ZERO,
+    );
+}
+
+/// Verifies a follower starts a new election when heartbeats stop.
+#[test]
+fn cluster_follower_starts_election_without_heartbeat() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+    let other_follower = ServerId::new(3);
+
+    let mut cluster = TestCluster::<String>::new(&[
+        leader_id,
+        follower_id,
+        other_follower,
+    ]);
+
+    // Elect the leader.
+    cluster.start_election(leader_id);
+
+    for _ in 0..4 {
+        cluster
+            .deliver_next()
+            .expect("election message should exist");
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    // The follower has not received a heartbeat.
+    //
+    // Four ticks are still below the election timeout.
+    for _ in 0..4 {
+        cluster.tick(follower_id);
+
+        assert_eq!(
+            cluster
+                .node(follower_id)
+                .expect("follower should exist")
+                .role(),
+            Role::Follower,
+        );
+    }
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .current_term()
+            .value(),
+        1,
+    );
+
+    // The fifth tick expires the election timer.
+    cluster.tick(follower_id);
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("candidate should exist")
+            .role(),
+        Role::Candidate,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("candidate should exist")
+            .current_term()
+            .value(),
+        2,
+    );
+
+    // The new candidate sends RequestVote to the other two servers.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+}

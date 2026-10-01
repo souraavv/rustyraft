@@ -2,8 +2,8 @@
 //!
 //! A Raft node owns the in-memory state of a single Raft server,
 //!
-//! by design we kept the network connections, timers, or durable storage
-//! outside the node
+//! by design we keep the network connections and timers outside the node
+//! and provide persistent storage through the storage abstraction.
 
 use crate::raft::{HeartbeatTimer, LogEntry, state_machine};
 use crate::raft::Role::{Follower};
@@ -39,6 +39,12 @@ use crate::raft::state_machine::{
     StateMachine,
 };
 
+use crate::raft::storage::{
+    InMemoryStorage,
+    PersistentMetadata,
+    RaftStorage,
+};
+
 /// A single Raft server.
 ///
 /// The node contains the state required to participate in the Raft protocol
@@ -67,7 +73,7 @@ pub struct RaftNode<
 
     // Each Raft server has some persistent state and other volatile
     // whom I voted, what was current term and logs are persitent
-    persistent: PersistentState<RaftLog<C>>,
+    storage: InMemoryStorage<C>,
     // last applied and commit index are volalite
     volatile: VolatileState,
 
@@ -106,11 +112,7 @@ where
             id,
             role: Role::Follower,
 
-            persistent: PersistentState {
-                current_term: Term::ZERO,
-                voted_for: None,
-                log: RaftLog::new(),
-            },
+            storage: InMemoryStorage::new(),
 
             volatile: VolatileState {
                 commit_index: LogIndex::ZERO,
@@ -126,6 +128,45 @@ where
             initial_heartbeat_pending: false,
         }
     }
+
+    fn persistent_metadata(&self) -> PersistentMetadata {
+        self.storage
+            .load_metadata()
+            .expect("in-memory storage cannot fail")
+    }
+
+    fn set_persistent_metadata(
+        &mut self,
+        current_term: Term,
+        voted_for: Option<ServerId>,
+    ) {
+        self.storage
+            .save_metadata(
+                PersistentMetadata::new(
+                    current_term,
+                    voted_for,
+                ),
+            )
+            .expect("in-memory storage cannot fail");
+    }
+
+    fn append_log_entry(
+        &mut self,
+        entry: LogEntry<C>,
+    ) -> LogIndex {
+        self.storage
+            .append_log_entry(entry)
+            .expect("in-memory storage cannot fail")
+    }
+
+    fn truncate_log_from(
+        &mut self,
+        index: LogIndex,
+    ) {
+        self.storage
+            .truncate_log_from(index)
+            .expect("in-memory storage cannot fail");
+    }
     // -----------------------------------------------
     // -------------------- Voting -------------------
     // -----------------------------------------------
@@ -136,8 +177,8 @@ where
         RequestVoteRequest::new(
             self.current_term(),
             self.id,
-            self.persistent.log.last_index(),
-            self.persistent.log.last_term().unwrap_or(Term::ZERO),
+            self.last_log_index(),
+            self.last_log_term(),
         )
     }
 
@@ -159,7 +200,7 @@ where
 
         // A request from an older term is simply reject
         // Receiver kept its current term and rejects the request
-        if request.term < self.persistent.current_term {
+        if request.term < self.current_term() {
             tracing::debug!(
                 server_id = self.id.value(),
                 candidate_id = request.candidate_id.value(),
@@ -168,23 +209,25 @@ where
                 "Rejecting RequestVote from older term"
             );
             return RequestVoteResponse::rejected(
-                self.persistent.current_term,
+                self.current_term(),
             );
         }
 
         // A newer term means this node has stale Raft state
         // Move to the newer term and clear the previous vote because
         // votes are tracked independently for each terms
-        if request.term > self.persistent.current_term {
+        if request.term > self.current_term() {
             tracing::info!(
                 server_id = self.id.value(),
-                old_term = self.persistent.current_term.value(),
+                old_term = self.current_term().value(),
                 new_term = request.term.value(),
                 "Updating term from RequestVote"
             );
 
-            self.persistent.current_term = request.term;
-            self.persistent.voted_for = None;
+            self.set_persistent_metadata(
+                request.term,
+                None,
+            );
             // I can't stay at any role including Leader (stale) 
             // If i discover someone requesting vote for higher term
             // I should de-promote my self as follower immediately on such
@@ -194,15 +237,14 @@ where
         }
 
         let grant_vote = should_grant_vote(
-            self.persistent.current_term,
-            self.persistent.voted_for,
+            self.current_term(),
+            self.voted_for(),
             request.candidate_id,
             request.term,
             request.last_log_index,
             request.last_log_term,
-            self.persistent.log.last_index(),
-            self.persistent.log.last_term()
-                .unwrap_or(Term::ZERO),
+            self.last_log_index(),
+            self.last_log_term(),
         );
 
         // election decided we can't vote to this candidate for this term
@@ -210,17 +252,20 @@ where
             tracing::debug!(
                 server_id = self.id.value(),
                 candidate_id = request.candidate_id.value(),
-                term = self.persistent.current_term.value(),
+                term = self.current_term().value(),
                 "Vote rejected"
             );
             return RequestVoteResponse::rejected(
-                self.persistent.current_term,
+                self.current_term(),
             );
         }
 
         // The candidate passed all voting rules. Record the vote so this
         // node cannot vote for a different candidate in the same term.
-        self.persistent.voted_for = Some(request.candidate_id);
+        self.set_persistent_metadata(
+            self.current_term(),
+            Some(request.candidate_id),
+        );
 
         // Granting a valid vote is election activity
         // reset the timer so that follower does not immediately
@@ -230,12 +275,12 @@ where
         tracing::info!(
             server_id = self.id.value(),
             candidate_id = request.candidate_id.value(),
-            term = self.persistent.current_term.value(),
+            term = self.current_term().value(),
             "Vote granted"
         );
 
         RequestVoteResponse::granted(
-            self.persistent.current_term,
+            self.current_term(),
         )
     }
 
@@ -260,16 +305,18 @@ where
 
         // A response from a newer term means our election is stale.
         // Move to that term and return to follower state.
-        if response.term > self.persistent.current_term {
+        if response.term > self.current_term() {
             tracing::info!(
                 server_id = self.id.value(),
-                old_term = self.persistent.current_term.value(),
+                old_term = self.current_term().value(),
                 new_term = response.term.value(),
                 "Stepping down because a newer term was observed"
             );
 
-            self.persistent.current_term = response.term;
-            self.persistent.voted_for = None;
+            self.set_persistent_metadata(
+                response.term,
+                None,
+            );
             self.role = Role::Follower;
             self.leader = None;
             self.election = None;
@@ -279,11 +326,11 @@ where
 
         // Only the election belonging to our current term can affect
         // the result of the current election.
-        if response.term < self.persistent.current_term {
+        if response.term < self.current_term() {
             tracing::debug!(
                 server_id = self.id.value(),
                 response_term = response.term.value(),
-                current_term = self.persistent.current_term.value(),
+                current_term = self.current_term().value(),
                 "Ignoring stale RequestVote response"
             );
 
@@ -348,11 +395,14 @@ where
     /// Sending RequestVote Rpc 
     pub fn start_election(&mut self) {
 
-        let new_term = self.persistent.current_term.next();
+        let new_term = self.current_term().next();
 
         // A new election always happens in a new term. The node moves
         // to that term before participating in the election.
-        self.persistent.current_term = new_term;
+        self.set_persistent_metadata(
+            new_term,
+            Some(self.id),
+        );
 
         // Starting an election makes this node a candidate. It will
         // remain a candidate until it wins, loses, or learns about
@@ -361,7 +411,6 @@ where
 
         // A candidate immediately votes for itself. This vote is also
         // recorded in ElectionState so it counts toward the majority.
-        self.persistent.voted_for = Some(self.id);
 
         // Any previous leader-specific state is no longer relevant
         // because this node is no longer acting as the leader.
@@ -399,7 +448,7 @@ where
         // Each node has its persistent store, now that will help to 
         // feed someinfo to the leader's state i.e., last_log_index
         // 
-        let last_log_index = self.persistent.log.last_index();
+        let last_log_index = self.last_log_index();
 
         self.role = Role::Leader;
 
@@ -452,7 +501,7 @@ where
 
         // A request from an older term cannot come from the current
         // leader, so reject it without modifying local state.
-        if request.term < self.persistent.current_term {
+        if request.term < self.current_term() {
             tracing::debug!(
                 server_id = self.id.value(),
                 leader_id = request.leader_id.value(),
@@ -462,23 +511,25 @@ where
             );
 
             return AppendEntriesResponse::failure(
-                self.persistent.current_term,
+                self.current_term(),
             );
         }
 
         // A newer term means this node has stale state. Move to the
         // leader's term and become a follower before processing the RPC.
-        if request.term > self.persistent.current_term {
+        if request.term > self.current_term() {
             tracing::info!(
                 server_id = self.id.value(),
-                old_term = self.persistent.current_term.value(),
+                old_term = self.current_term().value(),
                 new_term = request.term.value(),
                 leader_id = request.leader_id.value(),
                 "Updating term from AppendEntries"
             );
 
-            self.persistent.current_term = request.term;
-            self.persistent.voted_for = None;
+            self.set_persistent_metadata(
+                request.term,
+                None,
+            );
             // reset back to the follower
             self.role = Role::Follower;
             self.leader = None;
@@ -511,8 +562,8 @@ where
         // term, the follower must reject the request.
         if request.prev_log_index != LogIndex::ZERO {
             let previous_entry_matches = self
-                .persistent
-                .log
+                .storage
+                .log()
                 .matches(
                     request.prev_log_index,
                     request.prev_log_term,
@@ -527,7 +578,7 @@ where
                     prev_log_term =
                         request.prev_log_term.value(),
                     local_last_index =
-                        self.persistent.log.last_index().value(),
+                        self.last_log_index().value(),
                     "AppendEntries log consistency check failed"
                 );
 
@@ -536,7 +587,7 @@ where
                 // backtracking from nextIndex until it found.. and that's 
                 // where recovery start..
                 return AppendEntriesResponse::failure(
-                    self.persistent.current_term,
+                    self.current_term(),
                 );
             }
         }
@@ -560,7 +611,7 @@ where
             // we are interested in term at that index (start the current 
             // length which is essentially the prev_log_index provided
             // by the leader)
-            match self.persistent.log.term_at(index) {
+            match self.storage.log().term_at(index) {
                 Some(local_term) if local_term == entry.term => {
                     // This entry already matches the leader's entry.
                     // Nothing needs to be changed.
@@ -576,14 +627,14 @@ where
                         "Truncating conflicting log entries"
                     );
 
-                    self.persistent.log.truncate_from(index);
-                    self.persistent.log.append(entry);
+                    self.truncate_log_from(index);
+                    self.append_log_entry(entry);
                 }
 
                 None => {
                     // The follower does not have this entry yet, so
                     // append the missing leader entry.
-                    self.persistent.log.append(entry);
+                    self.append_log_entry(entry);
                 }
             }
         }
@@ -594,7 +645,7 @@ where
             // can't exceed my length anyway thus min of the leader commit_index
             let new_commit_index = std::cmp::min(
                 request.leader_commit,
-                self.persistent.log.last_index(),
+                self.last_log_index(),
             );
 
             tracing::debug!(
@@ -637,9 +688,9 @@ where
         tracing::debug!(
             server_id = self.id.value(),
             leader_id = request.leader_id.value(),
-            term = self.persistent.current_term.value(),
+            term = self.current_term().value(),
             last_log_index =
-                self.persistent.log.last_index().value(),
+                self.last_log_index().value(),
             replicated_index =
                 replicated_index.value(),
             commit_index =
@@ -648,7 +699,7 @@ where
         );
 
         AppendEntriesResponse::success(
-            self.persistent.current_term,
+            self.current_term(),
             replicated_index,
         )
     }
@@ -669,8 +720,8 @@ where
         leader.replication.build_append_entries(
             follower_id,
             self.id, 
-            self.persistent.current_term,
-            &self.persistent.log, 
+            self.current_term(),
+            self.storage.log(), 
             self.volatile.commit_index,
         )
     }
@@ -699,7 +750,7 @@ where
         // Some else become leader
         // A response from a newer term means this leader has stale
         // state and must step down before processing the response.
-        if response.term > self.persistent.current_term {
+        if response.term > self.current_term() {
             self.step_down_for_newer_term(response.term);
             return;
         }
@@ -707,12 +758,12 @@ where
         // Stale network packets
         // A response from an older term belongs to an earlier
         // interaction and cannot affect the current leader state.
-        if response.term < self.persistent.current_term {
+        if response.term < self.current_term() {
             tracing::debug!(
                 server_id = self.id.value(),
                 follower_id = follower_id.value(),
                 response_term = response.term.value(),
-                current_term = self.persistent.current_term.value(),
+                current_term = self.current_term().value(),
                 "Ignoring stale AppendEntries response"
             );
             return;
@@ -768,8 +819,8 @@ where
             return None;
         }
 
-        let term = self.persistent.current_term;
-        let index = self.persistent.log.append(
+        let term = self.current_term();
+        let index = self.append_log_entry(
             LogEntry::new(term, command),
         );
 
@@ -787,13 +838,15 @@ where
     fn step_down_for_newer_term(&mut self, term: Term) {
         tracing::info!(
             server_id = self.id.value(),
-            old_term = self.persistent.current_term.value(),
+            old_term = self.current_term().value(),
             new_term = term.value(),
             "Stepping down because a newer term was observed"
         );
 
-        self.persistent.current_term = term;
-        self.persistent.voted_for = None;
+        self.set_persistent_metadata(
+            term,
+            None,
+        );
         self.role = Role::Follower;
         self.leader = None;
         self.election = None;
@@ -830,13 +883,13 @@ where
         };
 
         // Leader should also consider his own counts towards the majority
-        match_indexes.push(self.persistent.log.last_index());
+        match_indexes.push(self.last_log_index());
         
         let new_commit_index = find_commit_index(
             self.volatile.commit_index,
-            self.persistent.current_term,
+            self.current_term(),
             &match_indexes,
-            |index| self.persistent.log.term_at(index),
+            |index| self.storage.log().term_at(index),
         );
 
         // there is a chance to persist
@@ -875,7 +928,7 @@ where
         while self.volatile.last_apply_index < self.volatile.commit_index {
             let index = self.volatile.last_apply_index.next();
 
-            let entry = match self.persistent.log.get(index) {
+            let entry = match self.storage.log().get(index) {
                 Some(entry) => entry,
                 None => {
                     tracing::error!(
@@ -1006,7 +1059,10 @@ where
         Self {
             id, 
             role: Role::Follower,
-            persistent,
+            storage:
+                InMemoryStorage::from_persistent_state(
+                    persistent,
+                ),
             volatile: VolatileState::new(),
             state_machine,
             leader: None, 
@@ -1027,15 +1083,15 @@ where
     }
 
     pub fn current_term(&self) -> Term {
-        self.persistent.current_term
+        self.persistent_metadata().current_term()
     }
 
     pub fn voted_for(&self) -> Option<ServerId> {
-        self.persistent.voted_for
+        self.persistent_metadata().voted_for()
     }
 
     pub fn log(&self) -> &RaftLog<C> {
-        &self.persistent.log
+        self.storage.log()
     }
 
     pub fn commit_index(&self) -> crate::raft::state::LogIndex {
@@ -1050,12 +1106,17 @@ where
         self.election.as_ref()
     }
 
-    pub fn last_log_index(&self) -> crate::raft::state::LogIndex {
-        self.persistent.log.last_index()
+    pub fn last_log_index(&self) -> LogIndex {
+        self.storage
+            .last_log_index()
+            .expect("in-memory storage cannot fail")
     }
 
     pub fn last_log_term(&self) -> Term {
-        self.persistent.log.last_term().unwrap_or(Term::ZERO)
+        self.storage
+            .log()
+            .last_term()
+            .unwrap_or(Term::ZERO)
     }
 
     // method is consuming the entire RaftNode
@@ -1064,7 +1125,7 @@ where
     pub fn into_persistent_state(
         self,
     ) -> PersistentState<RaftLog<C>> {
-        self.persistent
+        self.storage.into_persistent_state()
     }
 
 }
@@ -1087,11 +1148,7 @@ impl<C> RaftNode<C, NoopStateMachine> {
             id,
             role: Role::Follower,
 
-            persistent: PersistentState {
-                current_term: Term::ZERO,
-                voted_for: None,
-                log: RaftLog::new(),
-            },
+            storage: InMemoryStorage::new(),
 
             volatile: VolatileState {
                 commit_index: crate::raft::state::LogIndex::ZERO,

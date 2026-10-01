@@ -9,6 +9,7 @@ pub mod state;
 pub mod commit;
 pub mod state_machine;
 pub mod transport;
+pub mod storage;
 
 pub use log::{LogEntry, RaftLog};
 pub use node::{RaftNode};

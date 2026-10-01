@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use rustyraft::raft::{
     RaftNode,
+    Role,
     ServerId,
 };
 
@@ -298,6 +299,99 @@ impl <C: Clone> TestCluster<C> {
         self.transport.drop_to(
             server_id,
         )
+    }
+
+    /// Advances logical time for one node.
+    ///
+    /// A follower or candidate may start an election when its
+    /// election timer expires. A leader may generate heartbeat or
+    /// replication requests when its heartbeat timer expires.
+    pub fn tick(&mut self, server_id: ServerId) {
+        let server_ids: Vec<ServerId> =
+            self.nodes.keys().copied().collect();
+
+        let election_request = {
+            let node = self.nodes
+                .get_mut(&server_id)
+                .expect("node should exist");
+
+            let previous_term = node.current_term();
+
+            node.tick();
+
+            let started_election =
+                node.role() == Role::Candidate
+                && node.current_term() > previous_term;
+
+            if started_election {
+                Some(node.build_request_vote())
+            } else {
+                None
+            }
+        };
+
+        if let Some(request) = election_request {
+            for peer_id in server_ids {
+                if peer_id == server_id {
+                    continue;
+                }
+
+                let request = RequestVoteRequest::new(
+                    request.term,
+                    request.candidate_id,
+                    request.last_log_index,
+                    request.last_log_term,
+                );
+
+                self.transport.send(
+                    RaftMessage::new(
+                        server_id,
+                        peer_id,
+                        RaftMessagePayload::<C>::RequestVote(
+                            request,
+                        ),
+                    ),
+                );
+            }
+
+            return;
+        }
+
+        let requests = {
+            let node = self.nodes
+                .get_mut(&server_id)
+                .expect("node should exist");
+
+            if node.role() == Role::Leader {
+                node.heartbeat_requests()
+            } else {
+                Vec::new()
+            }
+        };
+
+        for (follower_id, request) in requests {
+            self.transport.send(
+                RaftMessage::new(
+                    server_id,
+                    follower_id,
+                    RaftMessagePayload::<C>::AppendEntries(
+                        request,
+                    ),
+                ),
+            );
+        }
+    }
+
+    /// Delivers exactly one pending transport message.
+    pub fn deliver_next(&mut self) -> Option<MessageDelivery> {
+        let message = self.transport.deliver_next()?;
+        Some(self.deliver_message(message))
+    }
+
+    /// Advances logical time once and delivers one message.
+    pub fn step(&mut self, server_id: ServerId) -> Option<MessageDelivery> {
+        self.tick(server_id);
+        self.deliver_next()
     }
 
 }
