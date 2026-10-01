@@ -981,7 +981,7 @@ where
         )
     }
 
-    fn read_metadata(
+    pub fn read_metadata(
         path: &Path,
     ) -> Result<
         PersistentMetadata,

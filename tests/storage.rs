@@ -635,3 +635,64 @@ fn file_storage_persists_log_truncation() {
         &path,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs;
+    use std::time::{
+        SystemTime,
+        UNIX_EPOCH,
+    };
+
+    /// Verifies corrupted metadata is rejected during recovery.
+    #[test]
+    fn file_storage_rejects_invalid_metadata() {
+        let timestamp =
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect(
+                    "system time should be valid",
+                )
+                .as_nanos();
+
+        let path =
+            std::env::temp_dir()
+                .join(
+                    format!(
+                        "rustyraft-invalid-metadata-{}",
+                        timestamp,
+                    )
+                );
+
+        fs::write(
+            &path,
+            b"invalid-metadata",
+        )
+        .expect(
+            "metadata test file should be created",
+        );
+
+        let result =
+            FileStorage::<String>::read_metadata(
+                &path,
+            );
+
+        assert!(
+            result.is_err()
+        );
+
+        assert_eq!(
+            result
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::InvalidData,
+        );
+
+        let _ =
+            fs::remove_file(
+                &path,
+            );
+    }
+}

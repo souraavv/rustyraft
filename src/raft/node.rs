@@ -1099,11 +1099,18 @@ where
         self.storage.log()
     }
 
-    pub fn commit_index(&self) -> crate::raft::state::LogIndex {
+    pub fn log_at(
+        &self,
+        index: LogIndex,
+    ) -> Option<&LogEntry<C>> {
+        self.log().get(index)
+    }
+
+    pub fn commit_index(&self) -> LogIndex {
         self.volatile.commit_index
     }
 
-    pub fn last_applied(&self) -> crate::raft::state::LogIndex {
+    pub fn last_applied(&self) -> LogIndex {
         self.volatile.last_apply_index
     }
 
