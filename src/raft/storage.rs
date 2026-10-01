@@ -29,6 +29,21 @@ use crate::raft::state::{
 
 use crate::raft::LogEntry;
 
+use std::fs::{
+    self,
+    File,
+};
+
+use std::io::{
+    self,
+    Read,
+    Write,
+};
+
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 /// Persistent Raft Metadata
 /// 
@@ -803,4 +818,614 @@ impl<C> RaftStorage<C> for InMemoryStorage<C> {
 }
 
 
+/// File-backed durable storage for Raft.
+///
+/// The storage keeps the recovered metadata and log in memory so normal
+/// Raft reads do not require disk I/O. Mutating operations persist the
+/// new state first and update the in-memory representation only after
+/// the durable write succeeds.
+///
+/// Commands are stored as UTF-8 strings in this first implementation.
+/// A future codec abstraction can support arbitrary command types.
 
+#[derive(Debug)]
+pub struct FileStorage<C> {
+    path: PathBuf,
+    metadata: PersistentMetadata,
+    log: RaftLog<C>,
+}
+
+impl<C> FileStorage<C>
+where
+    C: From<String>,
+{
+    // String literals are embedded in to the binary, thus 
+    // &'static str means a reference to a string which has entire programs
+    // lifetime ('static -> represent lifetime). Static surivive entier programs
+    // runtime
+    const METADATA_FILE: &'static str = "metadata";
+    const LOG_FILE: &'static str = "log";
+
+    const METADATA_MAGIC: &'static [u8] =
+        b"RUSTYRAFT-META-1";
+
+    const LOG_MAGIC: &'static [u8] =
+        b"RUSTYRAFT-LOG-1";
+
+    pub fn open<P>(
+        path: P,
+    ) -> Result<Self, io::Error>
+    where
+        P: AsRef<Path>,
+    {
+        let path = path.as_ref().to_path_buf();
+
+        fs::create_dir_all(&path)?;
+
+        let metadata_path =
+            path.join(Self::METADATA_FILE);
+
+        let log_path =
+            path.join(Self::LOG_FILE);
+
+        let metadata =
+            if metadata_path.exists() {
+                Self::read_metadata(
+                    &metadata_path,
+                )?
+            } else {
+                PersistentMetadata::new(
+                    Term::ZERO,
+                    None,
+                )
+            };
+
+        let log =
+            if log_path.exists() {
+                Self::read_log(
+                    &log_path,
+                )?
+            } else {
+                RaftLog::new()
+            };
+
+        Ok(Self {
+            path,
+            metadata,
+            log,
+        })
+    }
+
+    fn metadata_path(
+        &self,
+    ) -> PathBuf {
+        self.path.join(
+            Self::METADATA_FILE,
+        )
+    }
+
+    fn log_path(
+        &self,
+    ) -> PathBuf {
+        self.path.join(
+            Self::LOG_FILE,
+        )
+    }
+
+    fn temporary_path(
+        path: &Path,
+    ) -> PathBuf {
+        let file_name =
+            path.file_name()
+                .expect(
+                    "storage path should have a filename",
+                );
+
+        path.with_file_name(
+            format!(
+                "{}.tmp",
+                file_name.to_string_lossy()
+            ),
+        )
+    }
+
+    fn write_metadata(
+        path: &Path,
+        metadata: &PersistentMetadata,
+    ) -> Result<(), io::Error> {
+        let temporary =
+            Self::temporary_path(path);
+
+        let mut file =
+            File::create(&temporary)?;
+
+        file.write_all(
+            Self::METADATA_MAGIC,
+        )?;
+
+        file.write_all(
+            &metadata
+                .current_term()
+                .value()
+                .to_le_bytes(),
+        )?;
+
+        match metadata.voted_for() {
+            Some(server_id) => {
+                file.write_all(&[1])?;
+
+                file.write_all(
+                    &server_id
+                        .value()
+                        .to_le_bytes(),
+                )?;
+            }
+
+            None => {
+                file.write_all(&[0])?;
+            }
+        }
+
+        file.sync_all()?;
+
+        fs::rename(
+            &temporary,
+            path,
+        )?;
+
+        Self::sync_directory(
+            path.parent()
+                .expect(
+                    "metadata path should have a parent",
+                ),
+        )
+    }
+
+    fn read_metadata(
+        path: &Path,
+    ) -> Result<
+        PersistentMetadata,
+        io::Error,
+    > {
+        let mut file =
+            File::open(path)?;
+
+        let mut magic =
+            vec![0u8; Self::METADATA_MAGIC.len()];
+
+        file.read_exact(
+            &mut magic,
+        )?;
+
+        if magic
+            != Self::METADATA_MAGIC
+        {
+            return Err(
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Raft metadata file",
+                ),
+            );
+        }
+
+        let term =
+            Self::read_u64(
+                &mut file,
+            )?;
+
+        let mut vote_marker =
+            [0u8; 1];
+
+        file.read_exact(
+            &mut vote_marker,
+        )?;
+
+        let voted_for =
+            match vote_marker[0] {
+                0 => None,
+
+                1 => Some(
+                    ServerId::new(
+                        Self::read_u64(
+                            &mut file,
+                        )?,
+                    ),
+                ),
+
+                _ => {
+                    return Err(
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid voted_for marker",
+                        ),
+                    );
+                }
+            };
+
+        Ok(
+            PersistentMetadata::new(
+                Term::new(term),
+                voted_for,
+            ),
+        )
+    }
+
+    /// T: AsRef<str> means:
+    // Give me any type T that knows how to give me a reference to a str.
+    // e.g., "name", String::from("hello")
+    // T as ref -> &str
+    fn write_log(
+        path: &Path,
+        log: &RaftLog<C>,
+    ) -> Result<(), io::Error>
+    where
+        C: AsRef<str>,
+    {
+        let temporary =
+            Self::temporary_path(path);
+
+        let mut file =
+            File::create(&temporary)?;
+
+        file.write_all(
+            Self::LOG_MAGIC,
+        )?;
+
+        file.write_all(
+            &(log.len() as u64)
+                .to_le_bytes(),
+        )?;
+
+        for entry in log.iter() {
+            let command =
+                entry.command.as_ref();
+
+            let bytes =
+                command.as_bytes();
+
+            file.write_all(
+                &entry
+                    .term
+                    .value()
+                    .to_le_bytes(),
+            )?;
+
+            file.write_all(
+                &(bytes.len() as u64)
+                    .to_le_bytes(),
+            )?;
+
+            file.write_all(
+                bytes,
+            )?;
+        }
+
+        file.sync_all()?;
+
+        fs::rename(
+            &temporary,
+            path,
+        )?;
+
+        Self::sync_directory(
+            path.parent()
+                .expect(
+                    "log path should have a parent",
+                ),
+        )
+    }
+
+    fn read_log(
+        path: &Path,
+    ) -> Result<
+        RaftLog<C>,
+        io::Error,
+    > {
+        let mut file =
+            File::open(path)?;
+
+        let mut magic =
+            vec![0u8; Self::LOG_MAGIC.len()];
+
+        file.read_exact(
+            &mut magic,
+        )?;
+
+        if magic
+            != Self::LOG_MAGIC
+        {
+            return Err(
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid Raft log file",
+                ),
+            );
+        }
+
+        let entry_count =
+            Self::read_u64(
+                &mut file,
+            )?;
+
+        let mut log =
+            RaftLog::new();
+
+        for _ in 0..entry_count {
+            let term =
+                Term::new(
+                    Self::read_u64(
+                        &mut file,
+                    )?,
+                );
+
+            let command_length =
+                Self::read_u64(
+                    &mut file,
+                )?;
+
+            let command_length =
+                usize::try_from(
+                    command_length,
+                )
+                .map_err(
+                    |_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "command is too large",
+                        )
+                    },
+                )?;
+
+            let mut bytes =
+                vec![0u8; command_length];
+
+            file.read_exact(
+                &mut bytes,
+            )?;
+
+            let command =
+                String::from_utf8(
+                    bytes,
+                )
+                .map_err(
+                    |_| {
+                        io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "log command is not valid UTF-8",
+                        )
+                    },
+                )?;
+
+            log.append(
+                LogEntry::new(
+                    term,
+                    C::from(command),
+                ),
+            );
+        }
+
+        Ok(log)
+    }
+
+    fn read_u64(
+        file: &mut File,
+    ) -> Result<u64, io::Error> {
+        let mut bytes =
+            [0u8; 8];
+
+        file.read_exact(
+            &mut bytes,
+        )?;
+
+        Ok(
+            u64::from_le_bytes(
+                bytes,
+            )
+        )
+    }
+
+    fn sync_directory(
+        path: &Path,
+    ) -> Result<(), io::Error> {
+        let directory =
+            File::open(path)?;
+
+        directory.sync_all()
+    }
+}
+
+impl<C> DurableStorage<C>
+    for FileStorage<C>
+where
+    C: From<String> + AsRef<str>,
+{
+    type Error = io::Error;
+
+    fn load_metadata(
+        &self,
+    ) -> Result<
+        PersistentMetadata,
+        Self::Error,
+    > {
+        Ok(
+            PersistentMetadata::new(
+                self.metadata.current_term(),
+                self.metadata.voted_for(),
+            )
+        )
+    }
+
+    fn log(
+        &self,
+    ) -> &RaftLog<C> {
+        &self.log
+    }
+
+    fn save_metadata(
+        &mut self,
+        metadata: PersistentMetadata,
+    ) -> Result<(), Self::Error> {
+        Self::write_metadata(
+            &self.metadata_path(),
+            &metadata,
+        )?;
+
+        self.metadata =
+            metadata;
+
+        Ok(())
+    }
+
+    fn last_log_index(
+        &self,
+    ) -> Result<
+        LogIndex,
+        Self::Error,
+    > {
+        Ok(
+            self.log.last_index()
+        )
+    }
+
+    fn term_at(
+        &self,
+        index: LogIndex,
+    ) -> Result<
+        Option<Term>,
+        Self::Error,
+    > {
+        Ok(
+            self.log.term_at(index)
+        )
+    }
+
+    fn log_at(
+        &self,
+        index: LogIndex,
+    ) -> Result<
+        Option<LogEntry<C>>,
+        Self::Error,
+    >
+    where
+        C: Clone,
+    {
+        Ok(
+            self.log
+                .get(index)
+                .cloned()
+        )
+    }
+
+    fn entries_from(
+        &self,
+        start_index: LogIndex,
+    ) -> Result<
+        Vec<LogEntry<C>>,
+        Self::Error,
+    >
+    where
+        C: Clone,
+    {
+        let mut entries =
+            Vec::new();
+
+        let mut index =
+            start_index;
+
+        while let Some(entry) =
+            self.log.get(index)
+        {
+            entries.push(
+                entry.clone()
+            );
+
+            index =
+                index.next();
+        }
+
+        Ok(entries)
+    }
+
+    fn append_log_entry(
+        &mut self,
+        entry: LogEntry<C>,
+    ) -> Result<
+        LogIndex,
+        Self::Error,
+    > {
+        let index =
+            self.log.last_index()
+                .next();
+
+        let mut temporary_log =
+            RaftLog::new();
+
+        for existing in
+            self.log.iter()
+        {
+            temporary_log.append(
+                LogEntry::new(
+                    existing.term,
+                    existing.command.as_ref()
+                        .to_string()
+                        .into(),
+                ),
+            );
+        }
+
+        temporary_log.append(
+            entry,
+        );
+
+        Self::write_log(
+            &self.log_path(),
+            &temporary_log,
+        )?;
+
+        self.log =
+            temporary_log;
+
+        Ok(index)
+    }
+
+    fn truncate_log_from(
+        &mut self,
+        index: LogIndex,
+    ) -> Result<(), Self::Error> {
+        let mut truncated_log =
+            RaftLog::new();
+
+        let mut current_index =
+            LogIndex::new(1);
+
+        while let Some(entry) =
+            self.log.get(current_index)
+        {
+            if current_index >= index {
+                break;
+            }
+
+            truncated_log.append(
+                LogEntry::new(
+                    entry.term,
+                    entry.command.as_ref()
+                        .to_string()
+                        .into(),
+                ),
+            );
+
+            current_index =
+                current_index.next();
+        }
+
+        Self::write_log(
+            &self.log_path(),
+            &truncated_log,
+        )?;
+
+        self.log =
+            truncated_log;
+
+        Ok(())
+    }
+}
