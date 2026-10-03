@@ -175,21 +175,112 @@ where
             .truncate_log_from(index)
             .expect("in-memory storage cannot fail");
     }
-    // -----------------------------------------------
-    // -------------------- Voting -------------------
-    // -----------------------------------------------
-    
-    pub fn build_request_vote(
-        &self
-    ) -> RequestVoteRequest {
-        RequestVoteRequest::new(
-            self.current_term(),
-            self.id,
-            self.last_log_index(),
-            self.last_log_term(),
-        )
+
+
+    // ------------------------------
+    // --------- Actions ------------
+    // ------------------------------
+    fn request_vote_actions(
+        &self,
+        cluster_servers: &[ServerId],
+    ) -> Vec<RaftAction<C>> {
+
+        // create a request vote request
+        let request = self.build_request_vote();
+
+        // iterate through the cluster server known to me and create
+        // an action (note with this change i added clone to the 
+        // requestvoterequest)
+        cluster_servers
+            .iter()
+            .copied()
+            .filter(|server_id| *server_id != self.id)
+            .map(|server_id| {
+                RaftAction::SendRequestVote {
+                    target: server_id,
+                    request: request.clone(),
+                }
+            })
+            .collect()
     }
 
+    /// Build AppendEntries actions for all followers.
+    ///
+    /// AppendEntries is used both for heartbeats and for log replication.
+    /// The node decides when the requests are required and builds the
+    /// protocol actions. The runtime is responsible for executing them
+    /// through the transport.
+    pub fn append_entries_actions(
+        &mut self,
+    ) -> Vec<RaftAction<C>>
+    where
+        C: Clone,
+    {
+        // If I'm not a leader any more - stale network packet handling
+        if self.role != Role::Leader {
+            return Vec::new();
+        }
+
+        // If this is not the initial heartbeat and the heartbeat timer
+        // has not been expired yet then empty action
+        if !self.initial_heartbeat_pending
+            && !self.heartbeat_timer.expired()
+        {
+            return Vec::new();
+        }
+
+        // get the list of the followers
+        let follower_ids = match self.leader.as_ref() {
+            Some(leader) => leader.replication.follower_ids(),
+            None => {
+                tracing::warn!(
+                    server_id = self.id.value(),
+                    "Leader state missing while building AppendEntries actions"
+                );
+
+                return Vec::new();
+            }
+        };
+
+        let mut actions = Vec::new();
+
+        // Create a append entry action for each of the replica
+        // this action will be consumed by the RaftRuntime which then 
+        // will forward this to the transport layer
+        for follower_id in follower_ids {
+            if let Some(request) =
+                self.build_append_entries(follower_id)
+            {
+                actions.push(RaftAction::SendAppendEntries {
+                    target: follower_id,
+                    request,
+                });
+            }
+        }
+
+        // Sending append entry also has association with the the hearbeat
+        // we reset the hearbeat .. that way we dont overflood the hearbeat
+        // when we are already sending too many append entries
+        // AppendEntry request do reset the election timer on the candidates
+        // anyway
+        self.heartbeat_timer.reset();
+        self.initial_heartbeat_pending = false;
+
+        tracing::debug!(
+            server_id = self.id.value(),
+            append_entries_count = actions.len(),
+            "Built AppendEntries actions"
+        );
+
+        actions
+    }
+
+
+    // --------------------------------------------
+    // --------------- Handlers -------------------
+    // --------------------------------------------
+
+    /// 
     /// Handles a RequestVote RPC.
     ///
     /// The node owns the state changes required by the RPC while the election
@@ -418,196 +509,9 @@ where
         Vec::new()
     }
 
-    /// Starts a new election
-    /// 
-    /// the node increment its term, becomes a candidate, votes for itself
-    /// and create the state used to collect votes
-    /// 
-    /// Sending RequestVote Rpc 
-    pub fn start_election(&mut self) {
-
-        let new_term = self.current_term().next();
-
-        // A new election always happens in a new term. The node moves
-        // to that term before participating in the election.
-        self.set_persistent_metadata(
-            new_term,
-            Some(self.id),
-        );
-
-        // Starting an election makes this node a candidate. It will
-        // remain a candidate until it wins, loses, or learns about
-        // another server with a newer term.
-        self.role = Role::Candidate;
-
-        // A candidate immediately votes for itself. This vote is also
-        // recorded in ElectionState so it counts toward the majority.
-
-        // Any previous leader-specific state is no longer relevant
-        // because this node is no longer acting as the leader.
-        self.leader = None;
-
-        // Create the state used to collect votes for this election.
-        self.election = Some(ElectionState::new(
-            self.id,
-            new_term,
-        ));
-
-        tracing::info!(
-            server_id = self.id.value(),
-            term = new_term.value(),
-            "Raft node became candidate"
-        );
-    }
-
-
-    /// Create the leader state after winning the election
-    /// 
-    /// Every other server start with next_index immediately the leaders
-    /// last log entry. match_index start at ZERO 
-    fn become_leader(
-        &mut self, 
-        cluster_servers: &[ServerId],
-    ) {
-        // Get all your followers by iterating through the slice of Server Ids
-        let followers: Vec<ServerId> = cluster_servers
-            .iter()
-            .copied()
-            .filter(|server_id| *server_id != self.id)
-            .collect();
-
-        // Each node has its persistent store, now that will help to 
-        // feed someinfo to the leader's state i.e., last_log_index
-        // 
-        let last_log_index = self.last_log_index();
-
-        self.role = Role::Leader;
-
-        // The new leader must immediately establish
-        // its authority with an AppendEntries heartbeat.
-        self.initial_heartbeat_pending = true;
-
-        // leader assume each follower has log until its last log index
-        // later when it will discover differently it will share the append
-        // entries accordingly
-        self.leader = Some(LeaderState::new(
-            &followers,
-            last_log_index
-        ));
-
-        self.election = None;
-
-        tracing::info!(
-            server_id = self.id.value(),
-            term = self.current_term().value(),
-            last_log_index = last_log_index.value(),
-            follower_count = followers.len(),
-            "Raft node became leader"
-        );
-
-    }
-
-    // ------------------------------
-    // --------- Actions ------------
-    // ------------------------------
-    fn request_vote_actions(
-        &self,
-        cluster_servers: &[ServerId],
-    ) -> Vec<RaftAction<C>> {
-
-        // create a request vote request
-        let request = self.build_request_vote();
-
-        // iterate through the cluster server known to me and create
-        // an action (note with this change i added clone to the 
-        // requestvoterequest)
-        cluster_servers
-            .iter()
-            .copied()
-            .filter(|server_id| *server_id != self.id)
-            .map(|server_id| {
-                RaftAction::SendRequestVote {
-                    target: server_id,
-                    request: request.clone(),
-                }
-            })
-            .collect()
-    }
-
-    /// Build AppendEntries actions for all followers.
-    ///
-    /// AppendEntries is used both for heartbeats and for log replication.
-    /// The node decides when the requests are required and builds the
-    /// protocol actions. The runtime is responsible for executing them
-    /// through the transport.
-    pub fn append_entries_actions(
-        &mut self,
-    ) -> Vec<RaftAction<C>>
-    where
-        C: Clone,
-    {
-        // If I'm not a leader any more - stale network packet handling
-        if self.role != Role::Leader {
-            return Vec::new();
-        }
-
-        // If this is not the initial heartbeat and the heartbeat timer
-        // has not been expired yet then empty action
-        if !self.initial_heartbeat_pending
-            && !self.heartbeat_timer.expired()
-        {
-            return Vec::new();
-        }
-
-        // get the list of the followers
-        let follower_ids = match self.leader.as_ref() {
-            Some(leader) => leader.replication.follower_ids(),
-            None => {
-                tracing::warn!(
-                    server_id = self.id.value(),
-                    "Leader state missing while building AppendEntries actions"
-                );
-
-                return Vec::new();
-            }
-        };
-
-        let mut actions = Vec::new();
-
-        // Create a append entry action for each of the replica
-        // this action will be consumed by the RaftRuntime which then 
-        // will forward this to the transport layer
-        for follower_id in follower_ids {
-            if let Some(request) =
-                self.build_append_entries(follower_id)
-            {
-                actions.push(RaftAction::SendAppendEntries {
-                    target: follower_id,
-                    request,
-                });
-            }
-        }
-
-        // Sending append entry also has association with the the hearbeat
-        // we reset the hearbeat .. that way we dont overflood the hearbeat
-        // when we are already sending too many append entries
-        // AppendEntry request do reset the election timer on the candidates
-        // anyway
-        self.heartbeat_timer.reset();
-        self.initial_heartbeat_pending = false;
-
-        tracing::debug!(
-            server_id = self.id.value(),
-            append_entries_count = actions.len(),
-            "Built AppendEntries actions"
-        );
-
-        actions
-    }
-
-    // -----------------------------------------------
-    // ----------- Append Entries -------------------
-    // ----------------------------------------------
+    // ---------------------------------------------------------
+    // ----------- Append Entries handlers -------------------
+    // --------------------------------------------------------
 
     /// Handles an AppendEntries RPC from the leader.
     ///
@@ -851,28 +755,6 @@ where
         ]
     }
 
-    /// Build an AppendEntries request for a follower
-    /// 
-    /// The leader specific replication state determines which log entry 
-    /// the follower needs the next
-    pub fn build_append_entries(
-        &self, 
-        follower_id: ServerId,
-    ) -> Option<AppendEntriesRequest<C>>
-    where 
-        C: Clone,
-    {
-        let leader = self.leader.as_ref()?;
-
-        leader.replication.build_append_entries(
-            follower_id,
-            self.id, 
-            self.current_term(),
-            self.storage.log(), 
-            self.volatile.commit_index,
-        )
-    }
-
     /// Handles an AppendEntries resopnse from a follower
     ///
     /// Successfull replication advances the follower progress (succes_progress)
@@ -949,11 +831,142 @@ where
         Vec::new()
     }
 
+    // -----------------------------------------------
+    // ---------------- Request builder helpers ------
+    // -----------------------------------------------
+    
+    pub fn build_request_vote(
+        &self
+    ) -> RequestVoteRequest {
+        RequestVoteRequest::new(
+            self.current_term(),
+            self.id,
+            self.last_log_index(),
+            self.last_log_term(),
+        )
+    }
+
+
+    /// Build an AppendEntries request for a follower
+    /// 
+    /// The leader specific replication state determines which log entry 
+    /// the follower needs the next
+    pub fn build_append_entries(
+        &self, 
+        follower_id: ServerId,
+    ) -> Option<AppendEntriesRequest<C>>
+    where 
+        C: Clone,
+    {
+        let leader = self.leader.as_ref()?;
+
+        leader.replication.build_append_entries(
+            follower_id,
+            self.id, 
+            self.current_term(),
+            self.storage.log(), 
+            self.volatile.commit_index,
+        )
+    }
+
+    // --------------------------------
+    // ------ Election helpers --------
+    // --------------------------------
+
+    /// Starts a new election
+    /// 
+    /// the node increment its term, becomes a candidate, votes for itself
+    /// and create the state used to collect votes
+    /// 
+    /// Sending RequestVote Rpc 
+    pub fn start_election(&mut self) {
+
+        let new_term = self.current_term().next();
+
+        // A new election always happens in a new term. The node moves
+        // to that term before participating in the election.
+        self.set_persistent_metadata(
+            new_term,
+            Some(self.id),
+        );
+
+        // Starting an election makes this node a candidate. It will
+        // remain a candidate until it wins, loses, or learns about
+        // another server with a newer term.
+        self.role = Role::Candidate;
+
+        // A candidate immediately votes for itself. This vote is also
+        // recorded in ElectionState so it counts toward the majority.
+
+        // Any previous leader-specific state is no longer relevant
+        // because this node is no longer acting as the leader.
+        self.leader = None;
+
+        // Create the state used to collect votes for this election.
+        self.election = Some(ElectionState::new(
+            self.id,
+            new_term,
+        ));
+
+        tracing::info!(
+            server_id = self.id.value(),
+            term = new_term.value(),
+            "Raft node became candidate"
+        );
+    }
+
+
+    /// Create the leader state after winning the election
+    /// 
+    /// Every other server start with next_index immediately the leaders
+    /// last log entry. match_index start at ZERO 
+    fn become_leader(
+        &mut self, 
+        cluster_servers: &[ServerId],
+    ) {
+        // Get all your followers by iterating through the slice of Server Ids
+        let followers: Vec<ServerId> = cluster_servers
+            .iter()
+            .copied()
+            .filter(|server_id| *server_id != self.id)
+            .collect();
+
+        // Each node has its persistent store, now that will help to 
+        // feed someinfo to the leader's state i.e., last_log_index
+        // 
+        let last_log_index = self.last_log_index();
+
+        self.role = Role::Leader;
+
+        // The new leader must immediately establish
+        // its authority with an AppendEntries heartbeat.
+        self.initial_heartbeat_pending = true;
+
+        // leader assume each follower has log until its last log index
+        // later when it will discover differently it will share the append
+        // entries accordingly
+        self.leader = Some(LeaderState::new(
+            &followers,
+            last_log_index
+        ));
+
+        self.election = None;
+
+        tracing::info!(
+            server_id = self.id.value(),
+            term = self.current_term().value(),
+            last_log_index = last_log_index.value(),
+            follower_count = followers.len(),
+            "Raft node became leader"
+        );
+
+    }
+
+
     /// Appends a client command to the leader's log
     /// 
     /// Only the leader accept the new commands. The command is appended
     /// locally first; replicated to the followers happen separately
-    
     pub fn append_entry(
         &mut self, 
         command: C,
