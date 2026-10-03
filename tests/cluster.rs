@@ -207,13 +207,14 @@ fn append_entries_round_trip_uses_transport() {
 
         leader.start_election();
 
-        leader.handle_request_vote_response(
-            follower_id,
-            rustyraft::raft::rpc::RequestVoteResponse::granted(
-                Term::new(1),
-            ),
-            &server_ids,
-        );
+        let _actions =
+            leader.handle_request_vote_response(
+                follower_id,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            );
 
         assert_eq!(
             leader.role(),
@@ -359,13 +360,14 @@ fn append_entries_can_be_retried_after_drop() {
 
         leader.start_election();
 
-        leader.handle_request_vote_response(
-            follower_id,
-            rustyraft::raft::rpc::RequestVoteResponse::granted(
-                Term::new(1),
-            ),
-            &server_ids,
-        );
+        let _actions =
+            leader.handle_request_vote_response(
+                follower_id,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            );
 
         assert_eq!(
             leader.role(),
@@ -524,13 +526,14 @@ fn reordered_append_entries_does_not_move_progress_backward() {
 
         leader.start_election();
 
-        leader.handle_request_vote_response(
-            follower_id,
-            rustyraft::raft::rpc::RequestVoteResponse::granted(
-                Term::new(1),
-            ),
-            &server_ids,
-        );
+        let _actions =
+            leader.handle_request_vote_response(
+                follower_id,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            );
 
         assert_eq!(
             leader.role(),
@@ -747,13 +750,14 @@ fn duplicate_append_entries_does_not_duplicate_log_entries() {
 
         leader.start_election();
 
-        leader.handle_request_vote_response(
-            follower_id,
-            rustyraft::raft::rpc::RequestVoteResponse::granted(
-                Term::new(1),
-            ),
-            &server_ids,
-        );
+        let _actions =
+            leader.handle_request_vote_response(
+                follower_id,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            );
 
         assert_eq!(
             leader.role(),

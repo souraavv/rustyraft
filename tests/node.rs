@@ -32,6 +32,130 @@ use state_machine::{
     new_recording_state_machine,
 };
 
+use std::fmt::Debug;
+
+use rustyraft::raft::action::RaftAction;
+use rustyraft::raft::node::RaftNode;
+use rustyraft::raft::state_machine::StateMachine;
+
+
+fn test_handle_request_vote<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    request: RequestVoteRequest,
+) -> RequestVoteResponse
+where
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let candidate_id = request.candidate_id;
+
+    let actions = node.handle_request_vote(
+        candidate_id,
+        request,
+    );
+
+    actions
+        .into_iter()
+        .find_map(|action| match action {
+            RaftAction::SendRequestVoteResponse {
+                response,
+                ..
+            } => Some(response),
+            _ => None,
+        })
+        .expect("RequestVote must produce a response action")
+}
+
+fn test_handle_append_entries<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    request: AppendEntriesRequest<C>,
+) -> AppendEntriesResponse
+where
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let leader_id = request.leader_id;
+
+    let actions = node.handle_append_entries(
+        leader_id,
+        request,
+    );
+
+    actions
+        .into_iter()
+        .find_map(|action| match action {
+            RaftAction::SendAppendEntriesResponse {
+                response,
+                ..
+            } => Some(response),
+            _ => None,
+        })
+        .expect("AppendEntries must produce a response action")
+}
+
+fn test_handle_request_vote_response<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    voter_id: ServerId,
+    response: RequestVoteResponse,
+    cluster_servers: &[ServerId],
+) where
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let _ = node.handle_request_vote_response(
+        voter_id,
+        response,
+        cluster_servers,
+    );
+}
+
+fn test_handle_append_entries_response<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    follower_id: ServerId,
+    response: AppendEntriesResponse,
+) where
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let _ = node.handle_append_entries_response(
+        follower_id,
+        response,
+    );
+}
+
+fn test_tick<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    cluster_servers: &[ServerId],
+) -> Vec<RaftAction<C>>
+where
+    C: Clone,
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    node.tick(cluster_servers)
+}
+
+fn append_entries_actions<C>(
+    actions: Vec<RaftAction<C>>,
+) -> Vec<(ServerId, AppendEntriesRequest<C>)> {
+    actions
+        .into_iter()
+        .filter_map(|action| match action {
+            RaftAction::SendAppendEntries {
+                target,
+                request,
+            } => Some((target, request)),
+            _ => None,
+        })
+        .collect()
+}
+
+
 #[test]
 fn request_vote_rejects_older_term() {
     let mut node = new_node(
@@ -46,7 +170,7 @@ fn request_vote_rejects_older_term() {
         Term::ZERO,
     );
 
-    let response = node.handle_request_vote(request);
+    let response = test_handle_request_vote(&mut node, request);
 
     assert!(response.vote_granted);
     assert_eq!(node.current_term(), Term::new(2));
@@ -59,7 +183,7 @@ fn request_vote_rejects_older_term() {
         Term::ZERO,
     );
 
-    let response = node.handle_request_vote(request);
+    let response = test_handle_request_vote(&mut node, request);
 
     assert!(!response.vote_granted);
     assert_eq!(response.term, Term::new(2));
@@ -78,7 +202,7 @@ fn request_vote_updates_to_higher_term() {
         Term::ZERO,
     );
 
-    let response = node.handle_request_vote(request);
+    let response = test_handle_request_vote(&mut node, request);
 
     assert_eq!(node.current_term(), Term::new(3));
     assert_eq!(node.role(), Role::Follower);
@@ -98,7 +222,7 @@ fn request_vote_records_granted_vote() {
         Term::ZERO,
     );
 
-    let response = node.handle_request_vote(request);
+    let response = test_handle_request_vote(&mut node, request);
 
     assert!(response.vote_granted);
     assert_eq!(node.voted_for(), Some(candidate));
@@ -126,13 +250,12 @@ fn request_vote_rejects_different_candidate_after_voting() {
     );
 
     assert!(
-        node.handle_request_vote(first_request)
+        test_handle_request_vote(&mut node, first_request)
             .vote_granted
     );
 
     assert!(
-        !node
-            .handle_request_vote(second_request)
+        !test_handle_request_vote(&mut node, second_request)
             .vote_granted
     );
 
@@ -156,7 +279,7 @@ fn request_vote_allows_same_candidate_again() {
     );
 
     assert!(
-        node.handle_request_vote(request).vote_granted
+        test_handle_request_vote(&mut node, request).vote_granted
     );
 
     let request = RequestVoteRequest::new(
@@ -167,7 +290,7 @@ fn request_vote_allows_same_candidate_again() {
     );
 
     assert!(
-        node.handle_request_vote(request).vote_granted
+        test_handle_request_vote(&mut node, request).vote_granted
     );
 }
 
@@ -199,7 +322,7 @@ fn request_vote_rejects_candidate_with_older_log() {
     );
 
     let append_response =
-        node.handle_append_entries(append_request);
+        test_handle_append_entries(&mut node, append_request);
 
     assert!(
         append_response.success
@@ -219,7 +342,7 @@ fn request_vote_rejects_candidate_with_older_log() {
     );
 
     let response =
-        node.handle_request_vote(request);
+        test_handle_request_vote(&mut node, request);
 
     assert!(
         !response.vote_granted
@@ -329,7 +452,7 @@ fn candidate_stays_candidate_without_majority() {
         Term::new(1),
     );
 
-    node.handle_request_vote_response(
+    test_handle_request_vote_response(&mut node, 
         ServerId::new(2),
         response,
         &servers,
@@ -354,7 +477,7 @@ fn candidate_becomes_leader_after_majority() {
 
     node.start_election();
 
-    node.handle_request_vote_response(
+    test_handle_request_vote_response(&mut node, 
         ServerId::new(2),
         RequestVoteResponse::granted(Term::new(1)),
         &servers,
@@ -362,7 +485,7 @@ fn candidate_becomes_leader_after_majority() {
 
     assert_eq!(node.role(), Role::Candidate);
 
-    node.handle_request_vote_response(
+    test_handle_request_vote_response(&mut node, 
         ServerId::new(3),
         RequestVoteResponse::granted(Term::new(1)),
         &servers,
@@ -391,7 +514,7 @@ fn duplicate_vote_does_not_make_candidate_leader() {
         Term::new(1),
     );
 
-    node.handle_request_vote_response(
+    test_handle_request_vote_response(&mut node, 
         ServerId::new(2),
         response,
         &servers,
@@ -414,7 +537,7 @@ fn higher_term_vote_response_makes_candidate_follower() {
 
     node.start_election();
 
-    node.handle_request_vote_response(
+    test_handle_request_vote_response(&mut node, 
         ServerId::new(2),
         RequestVoteResponse::granted(Term::new(2)),
         &servers,
@@ -437,7 +560,7 @@ fn follower_accepts_heartbeat() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
     assert_eq!(response.term, Term::new(1));
@@ -457,7 +580,7 @@ fn follower_rejects_append_entries_from_older_term() {
         LogIndex::ZERO,
     );
 
-    node.handle_append_entries(newer_request);
+    test_handle_append_entries(&mut node, newer_request);
 
     let older_request = AppendEntriesRequest::heartbeat(
         Term::new(1),
@@ -467,7 +590,7 @@ fn follower_rejects_append_entries_from_older_term() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(older_request);
+    let response = test_handle_append_entries(&mut node, older_request);
 
     assert!(!response.success);
     assert_eq!(response.term, Term::new(2));
@@ -486,7 +609,7 @@ fn follower_updates_term_from_newer_append_entries() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
     assert_eq!(node.current_term(), Term::new(3));
@@ -506,7 +629,7 @@ fn follower_rejects_missing_previous_log_entry() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(!response.success);
     assert_eq!(response.term, Term::new(1));
@@ -531,7 +654,7 @@ fn follower_appends_new_entries() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
     assert_eq!(node.log().last_index(), LogIndex::new(3));
@@ -575,7 +698,7 @@ fn follower_replaces_conflicting_log_entries() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
     assert_eq!(node.log().last_index(), LogIndex::new(4));
@@ -602,7 +725,7 @@ fn follower_replaces_conflicting_log_entries() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
 
@@ -647,7 +770,7 @@ fn follower_advances_commit_index_from_leader() {
         LogIndex::new(3),
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
     assert_eq!(node.log().last_index(), LogIndex::new(4));
@@ -673,7 +796,7 @@ fn follower_does_not_commit_beyond_local_log() {
         LogIndex::new(10),
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
     assert_eq!(node.log().last_index(), LogIndex::new(3));
@@ -703,7 +826,7 @@ fn leader_builds_append_entries_for_follower() {
             Term::new(1),
         );
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         response,
         &[leader_id, follower_id],
@@ -757,7 +880,7 @@ fn leader_builds_append_entries_with_log_entries() {
             Term::new(1),
         );
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         response,
         &[leader_id, follower_id],
@@ -827,7 +950,7 @@ fn leader_and_follower_complete_log_replication_round() {
         Term::new(1),
     );
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         vote,
         &[leader_id, follower_id],
@@ -848,7 +971,7 @@ fn leader_and_follower_complete_log_replication_round() {
     assert_eq!(request.entries.len(), 3);
 
     // Send the request directly to the follower.
-    let response = follower.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
     assert_eq!(
@@ -858,7 +981,7 @@ fn leader_and_follower_complete_log_replication_round() {
 
     // Tell the leader that entries through index 3 were
     // successfully replicated.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -894,7 +1017,7 @@ fn leader_backs_up_next_index_when_follower_is_missing_index() {
 
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -926,14 +1049,13 @@ fn leader_backs_up_next_index_when_follower_is_missing_index() {
     );
 
     assert!(
-        follower
-            .handle_append_entries(setup_request)
+        test_handle_append_entries(&mut follower, setup_request)
             .success
     );
 
     // Simulate the leader previously learning that entries 1..3
     // were replicated. This puts next_index at 4.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         AppendEntriesResponse::success(
         Term::new(1),
@@ -972,11 +1094,11 @@ fn leader_backs_up_next_index_when_follower_is_missing_index() {
 
     // Follower actually only has indexes 1 and 2.
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(!response.success);
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -1010,7 +1132,7 @@ fn leader_retries_append_entries_after_failure() {
     // Elect the leader while both logs are empty.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1046,8 +1168,7 @@ fn leader_retries_append_entries_after_failure() {
     );
 
     assert!(
-        follower
-            .handle_append_entries(setup_request)
+        test_handle_append_entries(&mut follower, setup_request)
             .success
     );
 
@@ -1057,7 +1178,7 @@ fn leader_retries_append_entries_after_failure() {
     //
     // match_index = 3
     // next_index  = 4
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         AppendEntriesResponse::success(
         Term::new(1),
@@ -1095,11 +1216,11 @@ fn leader_retries_append_entries_after_failure() {
     );
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(!response.success);
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -1141,12 +1262,12 @@ fn leader_retries_append_entries_after_failure() {
     );
 
     let retry_response =
-        follower.handle_append_entries(retry_request);
+        test_handle_append_entries(&mut follower, retry_request);
 
     assert!(retry_response.success);
 
     // The retry successfully sends entry 3.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         retry_response,
     );
@@ -1190,7 +1311,7 @@ fn leader_advances_commit_index_after_majority_replication() {
     // Elect the leader.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1214,13 +1335,13 @@ fn leader_advances_commit_index_after_majority_replication() {
         .expect("leader should build AppendEntries");
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
     // Tell the leader that the follower successfully replicated
     // index 1.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -1246,7 +1367,7 @@ fn leader_does_not_advance_commit_index_without_majority() {
     // the election is complete.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_a,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_a, follower_b],
@@ -1278,7 +1399,7 @@ fn leader_commits_entry_after_replicating_to_follower() {
     // Elect the leader.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1300,12 +1421,12 @@ fn leader_commits_entry_after_replicating_to_follower() {
         .expect("leader should build AppendEntries");
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
     // Tell the leader that index 1 was replicated.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -1335,7 +1456,7 @@ fn follower_advances_commit_index_from_leader_commit() {
     // Elect the leader.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1357,7 +1478,7 @@ fn follower_advances_commit_index_from_leader_commit() {
     request.leader_commit = LogIndex::new(3);
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
@@ -1382,7 +1503,7 @@ fn follower_does_not_commit_past_local_log() {
 
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1402,7 +1523,7 @@ fn follower_does_not_commit_past_local_log() {
     request.leader_commit = LogIndex::new(3);
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
@@ -1426,7 +1547,7 @@ fn follower_commit_index_never_moves_backward() {
 
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1443,7 +1564,7 @@ fn follower_commit_index_never_moves_backward() {
     request.leader_commit = LogIndex::new(3);
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
     assert_eq!(
@@ -1459,7 +1580,7 @@ fn follower_commit_index_never_moves_backward() {
     request.leader_commit = LogIndex::new(1);
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
@@ -1478,7 +1599,7 @@ fn leader_commit_index_never_moves_backward() {
 
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1488,7 +1609,7 @@ fn leader_commit_index_never_moves_backward() {
 
     leader.append_entry("A".to_string());
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         AppendEntriesResponse::success(
         Term::new(1),
@@ -1523,7 +1644,7 @@ fn leader_does_not_commit_older_term_entry_directly() {
     // Term 1.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_a,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_a, follower_b],
@@ -1539,15 +1660,13 @@ fn leader_does_not_commit_older_term_entry_directly() {
     // does not prove the older-term rule. We need a new term.
     //
     // Step down because of a newer term.
-    leader.handle_append_entries(
-        AppendEntriesRequest::heartbeat(
+    test_handle_append_entries(&mut leader, AppendEntriesRequest::heartbeat(
             Term::new(2),
             follower_a,
             LogIndex::new(0),
             Term::ZERO,
             LogIndex::ZERO,
-        )
-    );
+        ));
 
     assert_eq!(leader.role(), Role::Follower);
 
@@ -1562,7 +1681,7 @@ fn leader_does_not_commit_older_term_entry_directly() {
     // The old entry is still at index 1 and belongs to term 1.
     //
     // Become leader again.
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_a,
         RequestVoteResponse::granted(Term::new(3)),
         &[leader_id, follower_a, follower_b],
@@ -1595,7 +1714,7 @@ fn last_applied_does_not_advance_when_application_fails() {
     // Elect the leader.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(
             Term::new(1),
@@ -1620,11 +1739,11 @@ fn last_applied_does_not_advance_when_application_fails() {
         );
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -1637,11 +1756,11 @@ fn last_applied_does_not_advance_when_application_fails() {
         );
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -1698,7 +1817,7 @@ fn follower_starts_election_when_election_timer_expires() {
     );
 
     for _ in 0..5 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -1719,7 +1838,7 @@ fn follower_does_not_start_election_before_timeout() {
     let mut node = new_node(server_id);
 
     for _ in 0..4 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -1741,7 +1860,7 @@ fn append_entries_resets_follower_election_timer() {
     let mut node = new_node(server_id);
 
     for _ in 0..4 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     let request = AppendEntriesRequest::heartbeat(
@@ -1752,12 +1871,12 @@ fn append_entries_resets_follower_election_timer() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
 
     for _ in 0..4 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -1774,7 +1893,7 @@ fn candidate_starts_another_election_after_timeout() {
 
     // First timeout starts the first election.
     for _ in 0..5 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -1791,7 +1910,7 @@ fn candidate_starts_another_election_after_timeout() {
     // Its election timer eventually expires again.
 
     for _ in 0..5 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -1813,7 +1932,7 @@ fn starting_another_election_increments_term_again() {
 
     for expected_term in 1..=3 {
         for _ in 0..5 {
-            node.tick();
+            test_tick(&mut node, &[server_id]);
         }
 
         assert_eq!(
@@ -1836,7 +1955,7 @@ fn candidate_does_not_start_another_election_before_timeout() {
 
     // First election.
     for _ in 0..5 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -1851,7 +1970,7 @@ fn candidate_does_not_start_another_election_before_timeout() {
 
     // Only four ticks into the next election.
     for _ in 0..4 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -1875,7 +1994,7 @@ fn candidate_steps_down_when_valid_append_entries_arrives() {
 
     // Become candidate.
     for _ in 0..5 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -1897,7 +2016,7 @@ fn candidate_steps_down_when_valid_append_entries_arrives() {
     );
 
     let response =
-        node.handle_append_entries(request);
+        test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
 
@@ -1914,392 +2033,215 @@ fn candidate_steps_down_when_valid_append_entries_arrives() {
 
 /// Verifies that a heartbeat is not generated
 /// again before the normal interval expires.
+
+
+
+
+
+
+/// Verifies that a newly elected leader emits its initial heartbeat
+/// through RaftAction rather than exposing a separate heartbeat API.
 #[test]
-fn leader_does_not_generate_second_heartbeat_before_interval() {
+fn leader_emits_initial_heartbeat_action_immediately() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let mut leader =
-        new_node(leader_id);
+    let cluster = [leader_id, follower_id];
+    let mut leader = new_node(leader_id);
 
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(
+        &mut leader,
         follower_id,
-        RequestVoteResponse::granted(
-            Term::new(1),
-        ),
-        &[leader_id, follower_id],
+        RequestVoteResponse::granted(Term::new(1)),
+        &cluster,
     );
 
-    assert_eq!(
-        leader.role(),
-        Role::Leader
-    );
+    assert_eq!(leader.role(), Role::Leader);
 
-    // The newly elected leader sends its initial
-    // heartbeat immediately.
-    let initial_requests =
-        leader.heartbeat_requests();
+    let actions = test_tick(&mut leader, &cluster);
+    let requests = append_entries_actions(actions);
 
-    assert_eq!(
-        initial_requests.len(),
-        1
-    );
-
-    // Four ticks are not enough for the next
-    // heartbeat interval.
-    for _ in 0..4 {
-        leader.tick();
-    }
-
-    let requests =
-        leader.heartbeat_requests();
-
-    assert!(
-        requests.is_empty()
-    );
-
-    // The fifth tick completes the normal interval.
-    leader.tick();
-
-    let requests =
-        leader.heartbeat_requests();
-
-    assert_eq!(
-        requests.len(),
-        1
-    );
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].0, follower_id);
+    assert!(requests[0].1.entries.is_empty());
 }
 
+/// Verifies that a leader does not emit another heartbeat until
+/// the normal heartbeat interval expires.
 #[test]
-fn leader_generates_heartbeat_for_each_follower() {
+fn leader_does_not_emit_second_heartbeat_before_interval() {
     let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
 
-    let followers = [
-        ServerId::new(2),
-        ServerId::new(3),
-        ServerId::new(4),
-    ];
+    let cluster = [leader_id, follower_id];
+    let mut leader = new_node(leader_id);
 
-    let cluster = [
-        leader_id,
-        followers[0],
-        followers[1],
-        followers[2],
-    ];
+    leader.start_election();
+    test_handle_request_vote_response(
+        &mut leader,
+        follower_id,
+        RequestVoteResponse::granted(Term::new(1)),
+        &cluster,
+    );
 
-    let mut leader =
-        new_node(leader_id);
+    // Consume the immediate heartbeat.
+    let actions = test_tick(&mut leader, &cluster);
+    assert_eq!(append_entries_actions(actions).len(), 1);
+
+    // Four ticks are not enough for the next heartbeat.
+    for _ in 0..4 {
+        let actions = test_tick(&mut leader, &cluster);
+        assert!(append_entries_actions(actions).is_empty());
+    }
+
+    // The fifth tick completes the heartbeat interval.
+    let actions = test_tick(&mut leader, &cluster);
+    assert_eq!(append_entries_actions(actions).len(), 1);
+}
+
+/// Verifies that one AppendEntries action is produced for every follower.
+#[test]
+fn leader_generates_append_entries_action_for_each_follower() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+    let follower_c = ServerId::new(4);
+
+    let cluster = [leader_id, follower_a, follower_b, follower_c];
+    let mut leader = new_node(leader_id);
 
     leader.start_election();
 
-    // The leader already voted for itself.
-    //
-    // Two additional votes give the candidate a
-    // majority in a four-node cluster.
-    leader.handle_request_vote_response(
-        followers[0],
-        RequestVoteResponse::granted(
-            Term::new(1),
-        ),
+    test_handle_request_vote_response(
+        &mut leader,
+        follower_a,
+        RequestVoteResponse::granted(Term::new(1)),
         &cluster,
     );
 
-    leader.handle_request_vote_response(
-        followers[1],
-        RequestVoteResponse::granted(
-            Term::new(1),
-        ),
+    test_handle_request_vote_response(
+        &mut leader,
+        follower_b,
+        RequestVoteResponse::granted(Term::new(1)),
         &cluster,
     );
 
-    assert_eq!(
-        leader.role(),
-        Role::Leader
-    );
+    assert_eq!(leader.role(), Role::Leader);
 
-    // The heartbeat interval is five ticks.
-    for _ in 0..5 {
-        leader.tick();
-    }
+    let actions = test_tick(&mut leader, &cluster);
+    let requests = append_entries_actions(actions);
 
-    let requests =
-        leader.heartbeat_requests();
+    assert_eq!(requests.len(), 3);
 
-    assert_eq!(
-        requests.len(),
-        3
-    );
+    let targets: Vec<ServerId> = requests
+        .into_iter()
+        .map(|(target, _)| target)
+        .collect();
 
-    assert!(
-        requests
-            .iter()
-            .all(|(_, request)| request.entries.is_empty())
-    );
+    assert!(targets.contains(&follower_a));
+    assert!(targets.contains(&follower_b));
+    assert!(targets.contains(&follower_c));
 }
 
+/// Verifies that a successful heartbeat reaches the follower and
+/// resets its election timer without advancing match_index.
 #[test]
 fn heartbeat_reaches_follower_and_resets_election_timer() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let cluster = [
-        leader_id,
-        follower_id,
-    ];
+    let cluster = [leader_id, follower_id];
+    let mut leader = new_node(leader_id);
+    let mut follower = new_node(follower_id);
 
-    let mut leader =
-        new_node(leader_id);
-
-    let mut follower =
-        new_node(follower_id);
-
-    // Elect the leader.
     leader.start_election();
-
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(
+        &mut leader,
         follower_id,
-        RequestVoteResponse::granted(
-            Term::new(1),
-        ),
+        RequestVoteResponse::granted(Term::new(1)),
         &cluster,
     );
 
-    assert_eq!(
-        leader.role(),
-        Role::Leader
-    );
+    assert_eq!(leader.role(), Role::Leader);
 
-    // Let the leader heartbeat timer expire.
-    for _ in 0..5 {
-        leader.tick();
-    }
-
-    let requests =
-        leader.heartbeat_requests();
-
-    assert_eq!(
-        requests.len(),
-        1
-    );
-
-    let (_, request) =
-        requests.into_iter().next().expect(
-            "leader should generate one heartbeat"
-        );
-
-    assert!(
-        request.entries.is_empty()
-    );
-
-    // Let the follower get close to its election timeout.
+    // Put the follower close to its election timeout.
     for _ in 0..4 {
-        follower.tick();
+        test_tick(&mut follower, &[follower_id]);
     }
 
-    assert_eq!(
-        follower.role(),
-        Role::Follower
-    );
+    let actions = test_tick(&mut leader, &cluster);
+    let requests = append_entries_actions(actions);
 
-    // Deliver the heartbeat.
-    let response =
-        follower.handle_append_entries(request);
+    assert_eq!(requests.len(), 1);
+
+    let (target, request) = requests
+        .into_iter()
+        .next()
+        .expect("heartbeat action");
+
+    assert_eq!(target, follower_id);
+    assert!(request.entries.is_empty());
+
+    let response = test_handle_append_entries(
+        &mut follower,
+        request,
+    );
 
     assert!(response.success);
 
-    // The heartbeat should have reset the follower's
-    // election timer. Therefore another four ticks should
-    // still not start an election.
-    for _ in 0..4 {
-        follower.tick();
-    }
-
-    assert_eq!(
-        follower.role(),
-        Role::Follower
-    );
-}
-
-#[test]
-fn successful_heartbeat_does_not_advance_match_index() {
-    let leader_id = ServerId::new(1);
-    let follower_id = ServerId::new(2);
-
-    let cluster = [
-        leader_id,
-        follower_id,
-    ];
-
-    let mut leader =
-        new_node(leader_id);
-
-    let mut follower =
-        new_node(follower_id);
-
-    // Elect the leader.
-    leader.start_election();
-
-    leader.handle_request_vote_response(
-        follower_id,
-        RequestVoteResponse::granted(
-            Term::new(1),
-        ),
-        &cluster,
-    );
-
-    assert_eq!(
-        leader.role(),
-        Role::Leader
-    );
-
-    let progress_before =
-        leader
-            .follower_progress(follower_id)
-            .expect(
-                "follower progress should exist"
-            );
-
-    assert_eq!(
-        progress_before.match_index,
-        LogIndex::ZERO
-    );
-
-    assert_eq!(
-        progress_before.next_index,
-        LogIndex::new(1)
-    );
-
-    // Wait for the heartbeat interval.
-    for _ in 0..5 {
-        leader.tick();
-    }
-
-    let requests =
-        leader.heartbeat_requests();
-
-    assert_eq!(
-        requests.len(),
-        1
-    );
-
-    let (_, request) =
-        requests.into_iter().next().expect(
-            "leader should generate heartbeat"
-        );
-
-    assert!(
-        request.entries.is_empty()
-    );
-
-    // Deliver the heartbeat.
-    let response =
-        follower.handle_append_entries(request);
-
-    assert!(
-        response.success
-    );
-
-    // A heartbeat contains no new log entry.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(
+        &mut leader,
         follower_id,
         response,
     );
 
-    let progress_after =
-        leader
-            .follower_progress(follower_id)
-            .expect(
-                "follower progress should exist"
-            );
+    let progress = leader
+        .follower_progress(follower_id)
+        .expect("leader should track follower");
 
-    // Nothing was replicated.
-    assert_eq!(
-        progress_after.match_index,
-        LogIndex::ZERO
-    );
+    assert_eq!(progress.match_index, LogIndex::ZERO);
 
-    // No new entry was replicated, so next_index
-    // must also remain unchanged.
-    assert_eq!(
-        progress_after.next_index,
-        LogIndex::new(1)
-    );
+    // The heartbeat reset the follower's election timer.
+    for _ in 0..4 {
+        test_tick(&mut follower, &[follower_id]);
+    }
+
+    assert_eq!(follower.role(), Role::Follower);
 }
 
+/// Verifies that a normal heartbeat round can be generated again
+/// after the heartbeat timer expires.
 #[test]
-fn leader_generates_heartbeat_again_after_next_interval() {
+fn leader_generates_heartbeat_again_after_interval() {
     let leader_id = ServerId::new(1);
     let follower_id = ServerId::new(2);
 
-    let cluster = [
-        leader_id,
-        follower_id,
-    ];
-
-    let mut leader =
-        new_node(leader_id);
+    let cluster = [leader_id, follower_id];
+    let mut leader = new_node(leader_id);
 
     leader.start_election();
-
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(
+        &mut leader,
         follower_id,
-        RequestVoteResponse::granted(
-            Term::new(1),
-        ),
+        RequestVoteResponse::granted(Term::new(1)),
         &cluster,
     );
 
-    assert_eq!(
-        leader.role(),
-        Role::Leader
-    );
+    // Initial heartbeat.
+    let actions = test_tick(&mut leader, &cluster);
+    assert_eq!(append_entries_actions(actions).len(), 1);
 
-    // First heartbeat round.
-    for _ in 0..5 {
-        leader.tick();
-    }
-
-    let first_round =
-        leader.heartbeat_requests();
-
-    assert_eq!(
-        first_round.len(),
-        1
-    );
-
-    // The timer must have been reset after the
-    // first heartbeat round.
-    let no_second_round =
-        leader.heartbeat_requests();
-
-    assert!(
-        no_second_round.is_empty()
-    );
-
-    // Four ticks are not enough for another heartbeat.
+    // Four ticks are not enough.
     for _ in 0..4 {
-        leader.tick();
+        let actions = test_tick(&mut leader, &cluster);
+        assert!(append_entries_actions(actions).is_empty());
     }
 
-    let still_no_round =
-        leader.heartbeat_requests();
-
-    assert!(
-        still_no_round.is_empty()
-    );
-
-    // The fifth tick completes the next interval.
-    leader.tick();
-
-    let second_round =
-        leader.heartbeat_requests();
-
-    assert_eq!(
-        second_round.len(),
-        1
-    );
+    // Fifth tick produces the next heartbeat.
+    let actions = test_tick(&mut leader, &cluster);
+    assert_eq!(append_entries_actions(actions).len(), 1);
 }
 
 #[test]
@@ -2322,7 +2264,7 @@ fn node_restart_preserves_persistent_state() {
             Term::new(1),
         );
 
-    node.handle_request_vote_response(
+    test_handle_request_vote_response(&mut node, 
         follower_id,
         response,
         &[server_id, follower_id],
@@ -2412,7 +2354,7 @@ fn follower_restart_continues_log_replication() {
     // Elect the leader.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(
             Term::new(1),
@@ -2459,7 +2401,7 @@ fn follower_restart_continues_log_replication() {
     );
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
@@ -2470,7 +2412,7 @@ fn follower_restart_continues_log_replication() {
 
     // Tell the leader that entries through index 2
     // were successfully replicated.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -2548,7 +2490,7 @@ fn follower_restart_continues_log_replication() {
     // Deliver the remaining entry to the
     // restarted follower.
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
@@ -2604,9 +2546,7 @@ fn request_vote_grants_candidate_with_newer_log_term() {
         );
 
     let response =
-        node.handle_append_entries(
-            append_request
-        );
+        test_handle_append_entries(&mut node, append_request);
 
     assert!(
         response.success
@@ -2621,7 +2561,7 @@ fn request_vote_grants_candidate_with_newer_log_term() {
         );
 
     let response =
-        node.handle_request_vote(request);
+        test_handle_request_vote(&mut node, request);
 
     assert!(
         response.vote_granted
@@ -2679,9 +2619,7 @@ fn request_vote_rejects_candidate_with_shorter_log_same_term() {
         );
 
     let response =
-        node.handle_append_entries(
-            append_request
-        );
+        test_handle_append_entries(&mut node, append_request);
 
     assert!(
         response.success
@@ -2696,7 +2634,7 @@ fn request_vote_rejects_candidate_with_shorter_log_same_term() {
         );
 
     let response =
-        node.handle_request_vote(request);
+        test_handle_request_vote(&mut node, request);
 
     assert!(
         !response.vote_granted
@@ -2727,7 +2665,7 @@ fn leader_retries_and_reconciles_follower_after_failure() {
     // Elect the leader.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_id,
         RequestVoteResponse::granted(
             Term::new(1),
@@ -2777,9 +2715,7 @@ fn leader_retries_and_reconciles_follower_after_failure() {
         );
 
     let response =
-        follower.handle_append_entries(
-            setup_request
-        );
+        test_handle_append_entries(&mut follower, setup_request);
 
     assert!(response.success);
 
@@ -2790,7 +2726,7 @@ fn leader_retries_and_reconciles_follower_after_failure() {
 
     // Simulate stale leader knowledge that index 3
     // had already been replicated.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         AppendEntriesResponse::success(
             Term::new(1),
@@ -2835,16 +2771,14 @@ fn leader_retries_and_reconciles_follower_after_failure() {
 
     // The follower does not have index 3.
     let response =
-        follower.handle_append_entries(
-            request
-        );
+        test_handle_append_entries(&mut follower, request);
 
     assert!(
         !response.success
     );
 
     // The leader backs next_index up.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -2885,9 +2819,7 @@ fn leader_retries_and_reconciles_follower_after_failure() {
     );
 
     let response =
-        follower.handle_append_entries(
-            request
-        );
+        test_handle_append_entries(&mut follower, request);
 
     assert!(
         response.success
@@ -2912,7 +2844,7 @@ fn leader_retries_and_reconciles_follower_after_failure() {
     );
 
     // Tell the leader that the retry succeeded.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_id,
         response,
     );
@@ -2980,9 +2912,7 @@ fn apply_committed_entries_applies_commands_in_order() {
         );
 
     let response =
-        node.handle_append_entries(
-            request
-        );
+        test_handle_append_entries(&mut node, request);
 
     assert!(
         response.success
@@ -3054,7 +2984,7 @@ fn follower_applies_committed_entries_in_order() {
     );
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
@@ -3087,7 +3017,7 @@ fn follower_applies_committed_entries_in_order() {
     );
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
@@ -3126,7 +3056,7 @@ fn stale_append_entries_does_not_reset_election_timer() {
         LogIndex::ZERO,
     );
 
-    let response = node.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
     assert_eq!(
@@ -3136,7 +3066,7 @@ fn stale_append_entries_does_not_reset_election_timer() {
 
     // Get close to the election timeout.
     for _ in 0..4 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -3155,7 +3085,7 @@ fn stale_append_entries_does_not_reset_election_timer() {
         );
 
     let response =
-        node.handle_append_entries(stale_request);
+        test_handle_append_entries(&mut node, stale_request);
 
     assert!(!response.success);
 
@@ -3166,7 +3096,7 @@ fn stale_append_entries_does_not_reset_election_timer() {
 
     // The stale message must not have reset the timer.
     // The next tick should therefore trigger an election.
-    node.tick();
+    test_tick(&mut node, &[server_id]);
 
     assert_eq!(
         node.role(),
@@ -3190,7 +3120,7 @@ fn granting_vote_resets_election_timer() {
 
     // Move close to the election timeout.
     for _ in 0..4 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -3207,7 +3137,7 @@ fn granting_vote_resets_election_timer() {
     );
 
     let response =
-        node.handle_request_vote(request);
+        test_handle_request_vote(&mut node, request);
 
     assert!(response.vote_granted);
     assert_eq!(
@@ -3219,7 +3149,7 @@ fn granting_vote_resets_election_timer() {
     // Four more ticks must still leave the node
     // as a follower.
     for _ in 0..4 {
-        node.tick();
+        test_tick(&mut node, &[server_id]);
     }
 
     assert_eq!(
@@ -3229,7 +3159,7 @@ fn granting_vote_resets_election_timer() {
 
     // The fifth tick after the reset should
     // eventually cause a new election.
-    node.tick();
+    test_tick(&mut node, &[server_id]);
 
     assert_eq!(
         node.role(),
@@ -3280,7 +3210,7 @@ fn candidate_steps_down_on_current_term_append_entries() {
         );
 
     let response =
-        node.handle_append_entries(request);
+        test_handle_append_entries(&mut node, request);
 
     assert!(response.success);
 
@@ -3305,7 +3235,7 @@ fn candidate_steps_down_on_current_term_append_entries() {
     // The heartbeat reset the election timer.
     // Four ticks must still leave us as a follower.
     for _ in 0..4 {
-        node.tick();
+        test_tick(&mut node, &[candidate_id]);
     }
 
     assert_eq!(
@@ -3315,70 +3245,6 @@ fn candidate_steps_down_on_current_term_append_entries() {
 }
 
 /// Verifies that the initial heartbeat is one-shot.
-#[test]
-fn initial_heartbeat_is_followed_by_normal_heartbeat_interval() {
-    let leader_id = ServerId::new(1);
-    let follower_id = ServerId::new(2);
-
-    let cluster = [
-        leader_id,
-        follower_id,
-    ];
-
-    let mut leader =
-        new_node(leader_id);
-
-    leader.start_election();
-
-    leader.handle_request_vote_response(
-        follower_id,
-        RequestVoteResponse::granted(
-            Term::new(1),
-        ),
-        &cluster,
-    );
-
-    assert_eq!(
-        leader.role(),
-        Role::Leader
-    );
-
-    // Initial heartbeat is available immediately.
-    let requests =
-        leader.heartbeat_requests();
-
-    assert_eq!(
-        requests.len(),
-        1
-    );
-
-    // It must not be generated again immediately.
-    let requests =
-        leader.heartbeat_requests();
-
-    assert!(
-        requests.is_empty()
-    );
-
-    // Normal heartbeat interval now applies.
-    for _ in 0..4 {
-        leader.tick();
-    }
-
-    assert!(
-        leader.heartbeat_requests().is_empty()
-    );
-
-    leader.tick();
-
-    let requests =
-        leader.heartbeat_requests();
-
-    assert_eq!(
-        requests.len(),
-        1
-    );
-}
 
 /// Verifies that a leader commits and applies a command
 /// after replication to a majority.
@@ -3397,7 +3263,7 @@ fn leader_commits_command_after_majority_replication() {
     // Elect node 1.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_a,
         RequestVoteResponse::granted(
             Term::new(1),
@@ -3451,7 +3317,7 @@ fn leader_commits_command_after_majority_replication() {
     );
 
     let response =
-        follower.handle_append_entries(request);
+        test_handle_append_entries(&mut follower, request);
 
     assert!(response.success);
 
@@ -3462,7 +3328,7 @@ fn leader_commits_command_after_majority_replication() {
 
     // Leader + follower_a = 2/3,
     // which is a majority.
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader, 
         follower_a,
         response,
     );
@@ -3511,7 +3377,7 @@ fn leader_does_not_commit_without_majority() {
     // Elect node 1.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader, 
         follower_a,
         RequestVoteResponse::granted(
             Term::new(1),

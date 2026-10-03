@@ -9,7 +9,7 @@ use crate::raft::state::{LogIndex, ServerId, Term};
 ///  - it identity
 ///
 /// This will help the reciver determine whether they can cast a vote or not
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RequestVoteRequest {
     pub term: Term,
     pub candidate_id: ServerId,

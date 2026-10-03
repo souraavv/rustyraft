@@ -10,10 +10,80 @@ use rustyraft::raft::replication::{
     ReplicationState,
 };
 
+use rustyraft::raft::action::RaftAction;
 use rustyraft::raft::{
     LogEntry, LogIndex, RaftLog, RaftNode, Role, ServerId, Term,
 };
-use rustyraft::raft::rpc::{AppendEntriesResponse, RequestVoteResponse};
+use rustyraft::raft::rpc::{
+    AppendEntriesRequest,
+    AppendEntriesResponse,
+    RequestVoteResponse,
+};
+use rustyraft::raft::state_machine::StateMachine;
+use rustyraft::raft::storage::RaftStorage;
+use std::fmt::Debug;
+
+fn test_handle_append_entries<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    request: AppendEntriesRequest<C>,
+) -> AppendEntriesResponse
+where
+    C: Clone,
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let actions = node.handle_append_entries(
+        request.leader_id,
+        request,
+    );
+
+    actions
+        .into_iter()
+        .find_map(|action| match action {
+            RaftAction::SendAppendEntriesResponse {
+                response,
+                ..
+            } => Some(response),
+            _ => None,
+        })
+        .expect("AppendEntries must produce a response action")
+}
+
+fn test_handle_request_vote_response<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    voter_id: ServerId,
+    response: RequestVoteResponse,
+    cluster_servers: &[ServerId],
+) where
+    C: Clone,
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let _ = node.handle_request_vote_response(
+        voter_id,
+        response,
+        cluster_servers,
+    );
+}
+
+fn test_handle_append_entries_response<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    follower_id: ServerId,
+    response: AppendEntriesResponse,
+) where
+    C: Clone,
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let _ = node.handle_append_entries_response(
+        follower_id,
+        response,
+    );
+}
+
 
 #[test]
 fn follower_progress_starts_at_given_next_index() {
@@ -354,7 +424,7 @@ fn successful_append_entries_response_advances_progress() {
         );
 
     let response =
-        rustyraft::raft::rpc::AppendEntriesResponse::success(
+        AppendEntriesResponse::success(
             Term::new(1),
             LogIndex::new(5),
         );
@@ -386,7 +456,7 @@ fn failed_append_entries_response_backs_up_next_index() {
         );
 
     let response =
-        rustyraft::raft::rpc::AppendEntriesResponse::failure(
+        AppendEntriesResponse::failure(
             Term::new(1),
         );
 
@@ -545,7 +615,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
     // Elect the leader in term 1.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader,
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -577,14 +647,14 @@ fn conflicting_follower_log_is_repaired_after_retry() {
 
     assert_eq!(request.entries.len(), 2);
 
-    let response = follower.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut follower, request);
 
     assert!(
         response.success,
         "initial common-prefix replication should succeed",
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         response,
     );
@@ -611,7 +681,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
     // so next_index remains 3.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader,
         follower_id,
         RequestVoteResponse::granted(Term::new(2)),
         &[leader_id, follower_id],
@@ -653,14 +723,14 @@ fn conflicting_follower_log_is_repaired_after_retry() {
         "C",
     );
 
-    let response = follower.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut follower, request);
 
     assert!(
         response.success,
         "C should replicate successfully",
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         response,
     );
@@ -768,14 +838,14 @@ fn conflicting_follower_log_is_repaired_after_retry() {
         "first request should check log consistency",
     );
 
-    let response = follower.handle_append_entries(request);
+    let response = test_handle_append_entries(&mut follower, request);
 
     assert!(
         !response.success,
         "follower should reject the conflicting previous entry",
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         response,
     );
@@ -831,14 +901,14 @@ fn conflicting_follower_log_is_repaired_after_retry() {
         "C",
     );
 
-    let response = follower.handle_append_entries(retry);
+    let response = test_handle_append_entries(&mut follower, retry);
 
     assert!(
         response.success,
         "follower should accept the corrected entry",
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         response,
     );
@@ -892,7 +962,7 @@ fn leader_steps_down_on_newer_term_append_entries_response() {
     // Elect the leader in term 1.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader,
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -928,7 +998,7 @@ fn leader_steps_down_on_newer_term_append_entries_response() {
         Term::new(2),
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         response,
     );
@@ -964,7 +1034,7 @@ fn leader_ignores_older_term_append_entries_response() {
     // Elect the leader in term 1.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader,
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -985,7 +1055,7 @@ fn leader_ignores_older_term_append_entries_response() {
 
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader,
         follower_id,
         RequestVoteResponse::granted(Term::new(2)),
         &[leader_id, follower_id],
@@ -1011,7 +1081,7 @@ fn leader_ignores_older_term_append_entries_response() {
         LogIndex::new(1),
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         current_response,
     );
@@ -1039,7 +1109,7 @@ fn leader_ignores_older_term_append_entries_response() {
         LogIndex::ZERO,
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         stale_response,
     );
@@ -1082,7 +1152,7 @@ fn stale_success_response_does_not_move_progress_backward() {
     // Elect the leader in term 1.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader,
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1124,7 +1194,7 @@ fn stale_success_response_does_not_move_progress_backward() {
         LogIndex::new(2),
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         response,
     );
@@ -1149,7 +1219,7 @@ fn stale_success_response_does_not_move_progress_backward() {
         LogIndex::new(3),
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         response,
     );
@@ -1177,7 +1247,7 @@ fn stale_success_response_does_not_move_progress_backward() {
         LogIndex::new(2),
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         stale_response,
     );
@@ -1209,7 +1279,7 @@ fn success_response_without_replicated_index_does_not_advance_progress() {
     // Elect the leader in term 1.
     leader.start_election();
 
-    leader.handle_request_vote_response(
+    test_handle_request_vote_response(&mut leader,
         follower_id,
         RequestVoteResponse::granted(Term::new(1)),
         &[leader_id, follower_id],
@@ -1226,7 +1296,7 @@ fn success_response_without_replicated_index_does_not_advance_progress() {
         LogIndex::new(2),
     );
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         valid_response,
     );
@@ -1253,7 +1323,7 @@ fn success_response_without_replicated_index_does_not_advance_progress() {
         replicated_index: None,
     };
 
-    leader.handle_append_entries_response(
+    test_handle_append_entries_response(&mut leader,
         follower_id,
         malformed_response,
     );

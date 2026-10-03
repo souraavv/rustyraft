@@ -11,13 +11,89 @@ use rustyraft::raft::{
 
 use rustyraft::raft::rpc::{
     AppendEntriesRequest,
+    AppendEntriesResponse,
     RequestVoteResponse,
     RequestVoteRequest,
 };
 
+use rustyraft::raft::action::RaftAction;
+use rustyraft::raft::state_machine::StateMachine;
+use rustyraft::raft::storage::RaftStorage;
+use rustyraft::raft::RaftNode;
+use std::fmt::Debug;
+
 use rustyraft::raft::transport::{
     InMemoryTransport, RaftMessage, RaftMessagePayload, Transport,
 };
+
+fn handle_request_vote<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    request: RequestVoteRequest,
+) -> RequestVoteResponse
+where
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let actions = node.handle_request_vote(
+        request.candidate_id,
+        request,
+    );
+
+    actions
+        .into_iter()
+        .find_map(|action| match action {
+            RaftAction::SendRequestVoteResponse {
+                response,
+                ..
+            } => Some(response),
+            _ => None,
+        })
+        .expect("RequestVote must produce a response action")
+}
+
+fn handle_append_entries<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    request: AppendEntriesRequest<C>,
+) -> AppendEntriesResponse
+where
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let actions = node.handle_append_entries(
+        request.leader_id,
+        request,
+    );
+
+    actions
+        .into_iter()
+        .find_map(|action| match action {
+            RaftAction::SendAppendEntriesResponse {
+                response,
+                ..
+            } => Some(response),
+            _ => None,
+        })
+        .expect("AppendEntries must produce a response action")
+}
+
+fn handle_request_vote_response<C, St, S>(
+    node: &mut RaftNode<C, St, S>,
+    voter_id: ServerId,
+    response: RequestVoteResponse,
+    cluster_servers: &[ServerId],
+) where
+    St: RaftStorage<C>,
+    S: StateMachine<C>,
+    St::Error: Debug,
+{
+    let _ = node.handle_request_vote_response(
+        voter_id,
+        response,
+        cluster_servers,
+    );
+}
 
 #[test]
 fn message_preserves_sender_and_receiver() {
@@ -319,10 +395,10 @@ fn transport_delivers_append_entries_to_follower() {
             RaftMessagePayload::AppendEntries(
                 request,
             ) => {
-                follower
-                    .handle_append_entries(
-                        request,
-                    )
+                handle_append_entries(
+                    &mut follower,
+                    request,
+                )
             }
 
             _ => {
@@ -403,10 +479,10 @@ fn transport_delivers_request_vote_to_follower() {
             RaftMessagePayload::RequestVote(
                 request,
             ) => {
-                follower
-                    .handle_request_vote(
-                        request,
-                    )
+                handle_request_vote(
+                    &mut follower,
+                    request,
+                )
             }
 
             _ => {
@@ -420,7 +496,8 @@ fn transport_delivers_request_vote_to_follower() {
         response.vote_granted
     );
 
-    candidate.handle_request_vote_response(
+    handle_request_vote_response(
+        &mut candidate,
         follower_id,
         response,
         &cluster,

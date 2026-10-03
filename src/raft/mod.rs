@@ -1,5 +1,6 @@
 //! Core Raft implementation.
 
+pub mod action;
 pub mod election;
 pub mod log;
 pub mod node;
@@ -11,7 +12,6 @@ pub mod state_machine;
 pub mod transport;
 pub mod runtime;
 pub mod storage;
-
 pub use log::{LogEntry, RaftLog};
 pub use node::{RaftNode};
 

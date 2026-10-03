@@ -1,29 +1,30 @@
 //! Runtime for driving a single Raft node
-//! 
-//! The runtime does own the execution of the Raft node while the transport
-//! reamins reponsible for moving messages
-//! 
-//! The runtime does not implement Raft protocol decision 
-//! It only drives the node, create out going messages, receives incoming 
+//!
+//! The runtime owns the execution of the Raft node while the transport
+//! remains responsible for moving messages.
+//!
+//! The runtime does not implement Raft protocol decisions.
+//! It only drives the node, executes outgoing actions, receives incoming
 //! messages, and dispatches them to the node.
+//!
+//! Ticks are internally driven.
+//!
+//! handle_message is externally driven.
 
+use crate::raft::action::RaftAction;
 use crate::raft::node::RaftNode;
-use crate::raft::rpc::RequestVoteRequest;
-use crate::raft::state::{
-    Role,
-    ServerId,
-};
+use crate::raft::state::ServerId;
+use crate::raft::state_machine::StateMachine;
+use crate::raft::storage::RaftStorage;
 use crate::raft::transport::{
     RaftMessage,
     RaftMessagePayload,
     Transport,
 };
-use crate::raft::storage::RaftStorage;
-use crate::raft::state_machine::StateMachine;
 
 use std::fmt::Debug;
 
-pub struct RaftRuntime<C, St, S, T> 
+pub struct RaftRuntime<C, St, S, T>
 where
     St: RaftStorage<C>,
     S: StateMachine<C>,
@@ -31,16 +32,15 @@ where
     T: Transport<C>,
 {
     node: RaftNode<C, St, S>,
-    transport: T, 
+    transport: T,
     cluster_servers: Vec<ServerId>,
 }
 
-impl <C, St, S, T> RaftRuntime<C, St, S, T>
-where 
+impl<C, St, S, T> RaftRuntime<C, St, S, T>
+where
     St: RaftStorage<C>,
     S: StateMachine<C>,
-    St: RaftStorage<C>,
-    St::Error: Debug, // associated error type must implement Debug
+    St::Error: Debug,
     T: Transport<C>,
 {
     pub fn new(
@@ -55,89 +55,44 @@ where
         }
     }
 
+    /// Advances the node's timers and executes any protocol actions
+    /// produced by the resulting state transition.
+    ///
+    /// The node owns the Raft protocol decision.
+    /// The runtime is responsible only for executing the actions.
     pub fn tick(
         &mut self,
-    ) 
-    where 
-        C: Clone,
-    {
-        let previous_term = 
-            self.node.current_term();
-
-        self.node.tick();
-
-        if self.node.role() == Role::Candidate
-            && self.node.current_term() > previous_term
-        {
-            self.send_request_votes();
-        }
-
-        if self.node.role() == Role::Leader {
-            self.send_heartbeats();
-        }
-    }
-
-    fn send_heartbeats(
-        &mut self,
     )
-    where 
+    where
         C: Clone,
     {
-        let requests =
-            self.node.heartbeat_requests();
+        let actions =
+            self.node.tick(&self.cluster_servers);
 
-        for (follower_id, request) in requests {
-            self.transport.send(
-                RaftMessage::new(
-                    self.node.id(),
-                    follower_id,
-                    RaftMessagePayload::AppendEntries(
-                        request,
-                    ),
-                ),
-            );
-        }
+        self.execute_actions(actions);
     }
 
-    fn send_request_votes(
+    /// Executes actions produced by the Raft node.
+    ///
+    /// The runtime deliberately does not decide why an action is required.
+    /// It only translates the action into a transport message and sends it.
+    fn execute_actions(
         &mut self,
+        actions: Vec<RaftAction<C>>,
     ) {
-        let term =
-            self.node.current_term();
+        let from = self.node.id();
 
-        let candidate_id =
-            self.node.id();
+        for action in actions {
+            let message =
+                action.into_message(from);
 
-        let last_log_index =
-            self.node.last_log_index();
-
-        let last_log_term =
-            self.node.last_log_term();
-
-        for server_id in
-            self.cluster_servers.iter().copied()
-        {
-            if server_id == candidate_id {
-                continue;
-            }
-
-            let request =
-                RequestVoteRequest::new(
-                    term,
-                    candidate_id,
-                    last_log_index,
-                    last_log_term,
-                );
-
-            self.transport.send(
-                RaftMessage::new(
-                    candidate_id,
-                    server_id,
-                    RaftMessagePayload::RequestVote(
-                        request,
-                    ),
-                ),
+            tracing::debug!(
+                from = message.from.value(),
+                to = message.to.value(),
+                "Executing Raft action"
             );
+
+            self.transport.send(message);
         }
     }
 
@@ -147,72 +102,74 @@ where
         self.transport.receive()
     }
 
-
+    /// Handles an incoming Raft message.
+    ///
+    /// The runtime is responsible for dispatching the message to the
+    /// appropriate RaftNode handler. Any actions produced by the node
+    /// are executed through the transport.
     pub fn handle_message(
-        &mut self, 
+        &mut self,
         message: RaftMessage<C>,
-    ) {
+    )
+    where
+        C: Clone,
+    {
+        let from = message.from;
+
         match message.payload {
             RaftMessagePayload::RequestVote(
                 request,
             ) => {
-                let response = 
-                    self.node.handle_request_vote(request);
-            
-                self.transport.send(
-                    RaftMessage::new(
-                        self.node.id(),
-                        message.from,
-                        RaftMessagePayload::RequestVoteResponse(
-                            response,
-                        ),
-                    ),
-                );
+                let actions =
+                    self.node.handle_request_vote(
+                        from,
+                        request,
+                    );
+
+                self.execute_actions(actions);
             }
 
             RaftMessagePayload::RequestVoteResponse(
                 response,
             ) => {
-                self.node
-                    .handle_request_vote_response(
-                        message.from, 
+                let actions =
+                    self.node.handle_request_vote_response(
+                        from,
                         response,
                         &self.cluster_servers,
                     );
+
+                self.execute_actions(actions);
             }
-            
+
             RaftMessagePayload::AppendEntries(
                 request,
             ) => {
-                let response = 
-                    self.node
-                        .handle_append_entries(
-                            request,
-                        );
-                
-                self.transport.send(
-                    RaftMessage::new(
-                        self.node.id(),
-                        message.from,
-                    RaftMessagePayload::AppendEntriesResponse(
-                        response,
-                    )),
-                );
+                let actions =
+                    self.node.handle_append_entries(
+                        from,
+                        request,
+                    );
+
+                self.execute_actions(actions);
             }
 
             RaftMessagePayload::AppendEntriesResponse(
                 response,
             ) => {
-                self.node
-                    .handle_append_entries_response(
-                        message.from, 
+                let actions =
+                    self.node.handle_append_entries_response(
+                        from,
                         response,
-                );
+                    );
+
+                self.execute_actions(actions);
             }
         }
     }
 
     // --- helpers ----
+
     pub fn node(
         &self,
     ) -> &RaftNode<C, St, S> {
@@ -226,9 +183,8 @@ where
     }
 
     pub fn transport(
-        &mut self, 
+        &mut self,
     ) -> &mut T {
         &mut self.transport
     }
-
 }

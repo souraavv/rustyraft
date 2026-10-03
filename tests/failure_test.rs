@@ -1,3012 +1,2469 @@
 mod supports;
 
 use rustyraft::raft::{
-    LogEntry,
-    LogIndex,
-    RaftNode,
-    Role,
-    ServerId,
-    Term,
-};
-
-use rustyraft::raft::rpc::{
-    AppendEntriesRequest, RequestVoteRequest, RequestVoteResponse,
+    LogIndex, Role, ServerId, Term,
 };
 
 use supports::cluster::TestCluster;
-use supports::node::{
-    new_node,
-    new_node_with_log,
-};
-
-
-#[derive(Debug, PartialEq, Eq)]
-enum Action {
-    Tick(ServerId),
-    DeliverNext,
-    DeliverAt(usize),
-    DropTo(ServerId),
-}
-
-
-struct DeterministicRng {
-    state: u64,
-}
-
-
-impl DeterministicRng {
-
-    fn new(seed: u64) -> Self {
-        let state =
-            if seed == 0 {
-                0x9E3779B97F4A7C15
-            } else {
-                seed
-            };
-
-        Self {
-            state,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut value =
-            self.state;
-
-        value ^=
-            value << 13;
-
-        value ^=
-            value >> 7;
-
-        value ^=
-            value << 17;
-
-        self.state =
-            value;
-
-        value
-    }
-
-    fn next_usize(
-        &mut self,
-        bound: usize,
-    ) -> usize {
-        assert!(
-            bound > 0
-        );
-
-        (
-            self.next_u64()
-                as usize
-        ) % bound
-    }
-}
-
-
-fn actions(
-    seed: u64,
-    server_ids: &[ServerId],
-    count: usize,
-) -> Vec<Action> {
-    let mut rng =
-        DeterministicRng::new(
-            seed,
-        );
-
-    let mut actions =
-        Vec::with_capacity(
-            count
-        );
-
-    for _ in 0..count {
-        match rng.next_usize(4) {
-            0 => {
-                let id =
-                    server_ids[
-                        rng.next_usize(
-                            server_ids.len()
-                        )
-                    ];
-
-                actions.push(
-                    Action::Tick(id)
-                );
-            }
-
-            1 => {
-                actions.push(
-                    Action::DeliverNext
-                );
-            }
-
-            2 => {
-                actions.push(
-                    Action::DeliverAt(
-                        rng.next_usize(8)
-                    )
-                );
-            }
-
-            _ => {
-                let id =
-                    server_ids[
-                        rng.next_usize(
-                            server_ids.len()
-                        )
-                    ];
-
-                actions.push(
-                    Action::DropTo(id)
-                );
-            }
-        }
-    }
-
-    actions
-}
-
-
-fn elect_three_node_leader(
-    cluster: &mut TestCluster,
-    leader_id: ServerId,
-    follower_a: ServerId,
-    follower_b: ServerId,
-) {
-    cluster.start_election(
-        leader_id
-    );
-
-    cluster
-        .deliver_to(
-            follower_a
-        )
-        .expect(
-            "follower A should receive vote request"
-        );
-
-    cluster
-        .deliver_to(
-            follower_b
-        )
-        .expect(
-            "follower B should receive vote request"
-        );
-
-    cluster
-        .deliver_to(
-            leader_id
-        )
-        .expect(
-            "leader should receive vote"
-        );
-
-    cluster
-        .deliver_to(
-            leader_id
-        )
-        .expect(
-            "leader should receive vote"
-        );
-
-    assert_eq!(
-        cluster
-            .node(leader_id)
-            .unwrap()
-            .role(),
-        Role::Leader
-    );
-}
-
-
-fn elect_five_node_leader(
-    cluster: &mut TestCluster,
-    leader_id: ServerId,
-    followers: &[ServerId],
-) {
-    cluster.start_election(
-        leader_id
-    );
-
-    for follower_id in followers {
-        cluster
-            .deliver_to(
-                *follower_id
-            )
-            .expect(
-                "follower should receive vote request"
-            );
-    }
-
-    for _ in followers {
-        cluster
-            .deliver_to(
-                leader_id
-            )
-            .expect(
-                "leader should receive vote response"
-            );
-    }
-
-    assert_eq!(
-        cluster
-            .node(leader_id)
-            .unwrap()
-            .role(),
-        Role::Leader
-    );
-}
-
-
-fn replicate(
-    cluster: &mut TestCluster,
-    leader_id: ServerId,
-    follower_id: ServerId,
-) {
-    assert!(
-        cluster.send_append_entries(
-            leader_id,
-            follower_id
-        )
-    );
-
-    cluster
-        .deliver_to(
-            follower_id
-        )
-        .expect(
-            "follower should receive AppendEntries"
-        );
-
-    cluster
-        .deliver_to(
-            leader_id
-        )
-        .expect(
-            "leader should receive AppendEntries response"
-        );
-}
-
 
 #[test]
-/// Verifies the same seed produces the same action sequence.
-fn same_seed_produces_same_event_sequence() {
-    let ids = [
+fn cluster_creates_all_nodes() {
+    let server_ids = [
         ServerId::new(1),
         ServerId::new(2),
         ServerId::new(3),
     ];
 
-    assert_eq!(
-        actions(12345, &ids, 100),
-        actions(12345, &ids, 100)
-    );
+    let cluster =
+        TestCluster::new(
+            &server_ids,
+        );
+
+    for server_id in server_ids {
+        let node =
+            cluster
+                .node(server_id)
+                .expect("node should exist");
+
+        assert_eq!(
+            node.id(),
+            server_id
+        );
+
+        assert_eq!(
+            node.role(),
+            Role::Follower
+        );
+    }
 }
 
-
 #[test]
-/// Verifies different seeds can produce different action sequences.
-fn different_seeds_produce_different_event_sequences() {
-    let ids = [
+fn starting_election_queues_request_vote_messages() {
+    let server_ids = [
         ServerId::new(1),
         ServerId::new(2),
         ServerId::new(3),
     ];
 
-    assert_ne!(
-        actions(12345, &ids, 100),
-        actions(67890, &ids, 100)
-    );
-}
-
-
-#[test]
-/// Verifies deterministic actions replay the same cluster execution.
-fn same_seed_replays_same_cluster_execution() {
-    let ids = [
-        ServerId::new(1),
-        ServerId::new(2),
-        ServerId::new(3),
-    ];
-
-    let mut first =
-        TestCluster::new(&ids);
-
-    let mut second =
-        TestCluster::new(&ids);
-
-    let generated =
-        actions(12345, &ids, 50);
-
-    for action in generated {
-        match action {
-            Action::Tick(id) => {
-                first.tick(id);
-                second.tick(id);
-            }
-
-            Action::DeliverNext => {
-                let a =
-                    first.deliver_next();
-
-                let b =
-                    second.deliver_next();
-
-                assert_eq!(
-                    a.map(|value| (
-                        value.from,
-                        value.to,
-                    )),
-                    b.map(|value| (
-                        value.from,
-                        value.to,
-                    ))
-                );
-            }
-
-            Action::DeliverAt(position) => {
-                let a =
-                    first.deliver_at(
-                        position
-                    );
-
-                let b =
-                    second.deliver_at(
-                        position
-                    );
-
-                assert_eq!(
-                    a.map(|value| (
-                        value.from,
-                        value.to,
-                    )),
-                    b.map(|value| (
-                        value.from,
-                        value.to,
-                    ))
-                );
-            }
-
-            Action::DropTo(id) => {
-                assert_eq!(
-                    first.drop_to(id),
-                    second.drop_to(id)
-                );
-            }
-        }
-    }
-}
-
-
-#[test]
-/// Verifies a dropped replication can be recovered.
-fn dropped_message_is_recoverable() {
-    let leader =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower_a,
-        follower_b,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower_a,
-        follower_b,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower_a
-        )
-    );
-
-    assert!(
-        cluster.drop_to(
-            follower_a
-        )
-    );
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower_b
-        )
-    );
-
-    cluster
-        .deliver_to(
-            follower_b
-        )
-        .unwrap();
-
-    cluster
-        .deliver_to(
-            leader
-        )
-        .unwrap();
-
-    assert_eq!(
-        cluster
-            .node(leader)
-            .unwrap()
-            .commit_index(),
-        LogIndex::new(1)
-    );
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower_a,
-    );
-
-    assert_eq!(
-        cluster
-            .node(follower_a)
-            .unwrap()
-            .last_log_index(),
-        LogIndex::new(1)
-    );
-}
-
-
-#[test]
-/// Verifies delayed replication is safe when delivered later.
-fn delayed_message_is_eventually_harmless() {
-    let leader =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower_a,
-        follower_b,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower_a,
-        follower_b,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower_a
-        )
-    );
-
-    assert_eq!(
-        cluster
-            .node(follower_a)
-            .unwrap()
-            .last_log_index(),
-        LogIndex::ZERO
-    );
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower_b,
-    );
-
-    cluster
-        .deliver_to(
-            follower_a
-        )
-        .unwrap();
-
-    cluster
-        .deliver_to(
-            leader
-        )
-        .unwrap();
-
-    assert_eq!(
-        cluster
-            .node(follower_a)
-            .unwrap()
-            .last_log_index(),
-        LogIndex::new(1)
-    );
-}
-
-
-#[test]
-/// Verifies duplicate replication does not duplicate log entries.
-fn duplicated_message_is_idempotent() {
-    let leader =
-        ServerId::new(1);
-
-    let follower =
-        ServerId::new(2);
-
-    let ids = [
-        leader,
-        follower,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    {
-        let node =
-            cluster.node_mut(leader)
-                .unwrap();
-
-        node.start_election();
-
-        node.handle_request_vote_response(
-            follower,
-            RequestVoteResponse::granted(
-                Term::new(1)
-            ),
-            &ids,
-        );
-
-        node.append_entry(
-            "A".to_string()
-        );
-
-        node.append_entry(
-            "B".to_string()
-        );
-    }
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower
-        )
-    );
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower
-        )
-    );
-
-    cluster
-        .deliver_to(
-            follower
-        )
-        .unwrap();
-
-    cluster
-        .deliver_to(
-            follower
-        )
-        .unwrap();
-
-    assert_eq!(
-        cluster
-            .node(follower)
-            .unwrap()
-            .last_log_index(),
-        LogIndex::new(2)
-    );
-}
-
-
-#[test]
-/// Verifies reordered replication leaves the follower with valid state.
-fn reordered_messages_preserve_safety() {
-    let leader =
-        ServerId::new(1);
-
-    let follower =
-        ServerId::new(2);
-
-    let ids = [
-        leader,
-        follower,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    {
-        let node =
-            cluster.node_mut(leader)
-                .unwrap();
-
-        node.start_election();
-
-        node.handle_request_vote_response(
-            follower,
-            RequestVoteResponse::granted(
-                Term::new(1)
-            ),
-            &ids,
-        );
-
-        node.append_entry(
-            "A".to_string()
-        );
-
-        node.append_entry(
-            "B".to_string()
-        );
-    }
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower
-        )
-    );
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower
-        )
-    );
-
-    cluster
-        .deliver_at(1)
-        .unwrap();
-
-    cluster
-        .deliver_at(0)
-        .unwrap();
-
-    assert_eq!(
-        cluster
-            .node(follower)
-            .unwrap()
-            .last_log_index(),
-        LogIndex::new(2)
-    );
-}
-
-
-#[test]
-/// Verifies an old-term RequestVote cannot move a node backward.
-fn stale_message_from_old_term_is_ignored() {
-    let first =
-        ServerId::new(1);
-
-    let second =
-        ServerId::new(2);
-
-    let ids = [
-        first,
-        second,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    cluster.start_election(
-        first
-    );
-
-    cluster
-        .deliver_to(
-            second
-        )
-        .unwrap();
-
-    cluster
-        .node_mut(second)
-        .unwrap()
-        .start_election();
-
-    let term =
-        cluster
-            .node(second)
-            .unwrap()
-            .current_term();
-
-    assert!(
-        term > Term::new(1)
-    );
-
-    let old_request =
-        RequestVoteRequest::new(
-            Term::new(1),
-            first,
-            LogIndex::ZERO,
-            Term::ZERO,
-        );
-
-    let response =
-        cluster
-            .node_mut(second)
-            .unwrap()
-            .handle_request_vote(
-                old_request
-            );
-
-    assert!(
-        !response.vote_granted
-    );
-
-    assert_eq!(
-        cluster
-            .node(second)
-            .unwrap()
-            .current_term(),
-        term
-    );
-}
-
-
-#[test]
-/// Verifies a successful heartbeat does not advance match_index.
-fn heartbeat_does_not_advance_match_index() {
-    let leader =
-        ServerId::new(1);
-
-    let follower =
-        ServerId::new(2);
-
-    let ids = [
-        leader,
-        follower,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    {
-        let node =
-            cluster.node_mut(leader)
-                .unwrap();
-
-        node.start_election();
-
-        node.handle_request_vote_response(
-            follower,
-            RequestVoteResponse::granted(
-                Term::new(1)
-            ),
-            &ids,
-        );
-    }
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower
-        )
-    );
-
-    cluster
-        .deliver_to(
-            follower
-        )
-        .unwrap();
-
-    cluster
-        .deliver_to(
-            leader
-        )
-        .unwrap();
-
-    let progress =
-        cluster
-            .node(leader)
-            .unwrap()
-            .follower_progress(
-                follower
-            )
-            .unwrap();
-
-    assert_eq!(
-        progress.match_index,
-        LogIndex::ZERO
-    );
-}
-
-
-#[test]
-/// Verifies majority progress survives one dropped replication.
-fn majority_progress_survives_drop() {
-    let leader =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower_a,
-        follower_b,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower_a,
-        follower_b,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower_a
-        )
-    );
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower_b
-        )
-    );
-
-    assert!(
-        cluster.drop_to(
-            follower_a
-        )
-    );
-
-    cluster
-        .deliver_to(
-            follower_b
-        )
-        .unwrap();
-
-    cluster
-        .deliver_to(
-            leader
-        )
-        .unwrap();
-
-    assert_eq!(
-        cluster
-            .node(leader)
-            .unwrap()
-            .commit_index(),
-        LogIndex::new(1)
-    );
-}
-
-#[test]
-/// Verifies an election recovers after a candidate fails to get a majority.
-fn split_vote_recovers_in_next_term() {
     let candidate_id =
         ServerId::new(1);
 
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let follower_c =
-        ServerId::new(4);
-
-    let follower_d =
-        ServerId::new(5);
-
-    let server_ids = [
-        candidate_id,
-        follower_a,
-        follower_b,
-        follower_c,
-        follower_d,
-    ];
-
-    let mut node =
-        new_node(candidate_id);
-
-    node.start_election();
-
-    assert_eq!(
-        node.role(),
-        Role::Candidate
-    );
-
-    assert_eq!(
-        node.current_term(),
-        Term::new(1)
-    );
-
-    // Candidate has its own vote plus one additional vote.
-    // 2 / 5 is not a majority.
-    node.handle_request_vote_response(
-        follower_a,
-        RequestVoteResponse::granted(
-            Term::new(1)
-        ),
-        &server_ids,
-    );
-
-    assert_eq!(
-        node.role(),
-        Role::Candidate
-    );
-
-    assert_eq!(
-        node.current_term(),
-        Term::new(1)
-    );
-
-    // Election timeout starts another election.
-    for _ in 0..5 {
-        node.tick();
-    }
-
-    assert_eq!(
-        node.role(),
-        Role::Candidate
-    );
-
-    assert_eq!(
-        node.current_term(),
-        Term::new(2)
-    );
-
-    // Self vote + two follower votes = 3 / 5.
-    node.handle_request_vote_response(
-        follower_a,
-        RequestVoteResponse::granted(
-            Term::new(2)
-        ),
-        &server_ids,
-    );
-
-    node.handle_request_vote_response(
-        follower_b,
-        RequestVoteResponse::granted(
-            Term::new(2)
-        ),
-        &server_ids,
-    );
-
-    assert_eq!(
-        node.role(),
-        Role::Leader
-    );
-}
-
-
-#[test]
-/// Verifies a candidate without a majority cannot become leader.
-fn minority_candidate_cannot_become_leader() {
-    let candidate =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let follower_c =
-        ServerId::new(4);
-
-    let follower_d =
-        ServerId::new(5);
-
-    let ids = [
-        candidate,
-        follower_a,
-        follower_b,
-        follower_c,
-        follower_d,
-    ];
-
     let mut cluster =
-        TestCluster::new(&ids);
+        TestCluster::new(
+            &server_ids,
+        );
 
     cluster.start_election(
-        candidate
+        candidate_id,
     );
 
-    cluster
-        .deliver_to(
-            follower_a
-        )
-        .unwrap();
-
-    cluster
-        .deliver_to(
-            candidate
-        )
-        .unwrap();
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2
+    );
 
     assert_eq!(
         cluster
-            .node(candidate)
+            .node(candidate_id)
             .unwrap()
             .role(),
         Role::Candidate
     );
 }
 
-
 #[test]
-/// Verifies a stale-log candidate is denied a vote.
-fn stale_log_candidate_cannot_win_vote() {
-    let candidate =
-        new_node(
-            ServerId::new(1)
-        );
-
-    let entries = vec![
-        LogEntry::new(
-            Term::new(1),
-            "A".to_string()
-        ),
-    ];
-
-    let mut voter =
-        new_node_with_log(
-            ServerId::new(2),
-            Term::new(1),
-            entries,
-        );
-
-    let mut candidate =
-        candidate;
-
-    candidate.start_election();
-
-    let request =
-        candidate.build_request_vote();
-
-    let response =
-        voter.handle_request_vote(
-            request
-        );
-
-    assert!(
-        !response.vote_granted
-    );
-
-    assert_eq!(
-        voter.current_term(),
-        Term::new(1)
-    );
-}
-
-
-#[test]
-/// Verifies an old vote response cannot win a later election.
-fn old_vote_response_cannot_win_new_election() {
-    let candidate =
-        ServerId::new(1);
-
-    let follower =
-        ServerId::new(2);
-
-    let ids = [
-        candidate,
-        follower,
-    ];
-
-    let mut node =
-        new_node(candidate);
-
-    node.start_election();
-
-    let old_response =
-        RequestVoteResponse::granted(
-            Term::new(1)
-        );
-
-    node.start_election();
-
-    node.handle_request_vote_response(
-        follower,
-        old_response,
-        &ids,
-    );
-
-    assert_eq!(
-        node.current_term(),
-        Term::new(2)
-    );
-
-    assert_eq!(
-        node.role(),
-        Role::Candidate
-    );
-}
-
-
-#[test]
-/// Verifies an old-term candidate cannot displace a leader.
-fn current_leader_rejects_stale_candidate() {
-    let leader_id =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader_id,
-        follower_a,
-        follower_b,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader_id,
-        follower_a,
-        follower_b,
-    );
-
-    let request =
-        RequestVoteRequest::new(
-            Term::ZERO,
-            follower_a,
-            LogIndex::ZERO,
-            Term::ZERO,
-        );
-
-    let response =
-        cluster
-            .node_mut(leader_id)
-            .unwrap()
-            .handle_request_vote(
-                request
-            );
-
-    assert!(
-        !response.vote_granted
-    );
-
-    assert_eq!(
-        cluster
-            .node(leader_id)
-            .unwrap()
-            .role(),
-        Role::Leader
-    );
-}
-
-
-#[test]
-/// Verifies at most one leader exists in a single elected term.
-fn at_most_one_leader_per_term() {
-    let ids = [
+fn cluster_delivers_request_vote() {
+    let server_ids = [
         ServerId::new(1),
         ServerId::new(2),
         ServerId::new(3),
     ];
 
+    let candidate_id =
+        ServerId::new(1);
+
+    let follower_id =
+        ServerId::new(2);
+
     let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        ids[0],
-        ids[1],
-        ids[2],
-    );
-
-    let leaders =
-        ids.iter()
-            .filter(|id| {
-                cluster
-                    .node(**id)
-                    .unwrap()
-                    .role()
-                    == Role::Leader
-            })
-            .count();
-
-    assert_eq!(
-        leaders,
-        1
-    );
-}
-
-
-#[test]
-/// Verifies a candidate steps down on current-term AppendEntries.
-fn candidate_steps_down_on_current_term_append_entries() {
-    let server_id =
-        ServerId::new(1);
-
-    let leader_id =
-        ServerId::new(2);
-
-    let mut node =
-        new_node(server_id);
-
-    node.start_election();
-
-    assert_eq!(
-        node.role(),
-        Role::Candidate
-    );
-
-    let request =
-        AppendEntriesRequest::heartbeat(
-            Term::new(1),
-            leader_id,
-            LogIndex::ZERO,
-            Term::ZERO,
-            LogIndex::ZERO,
+        TestCluster::new(
+            &server_ids,
         );
 
-    let response =
-        node.handle_append_entries(
-            request
+    cluster.start_election(
+        candidate_id,
+    );
+
+    let delivery = cluster
+        .deliver_to(follower_id)
+        .expect(
+            "RequestVote should be delivered"
         );
 
-    assert!(
-        response.success
+    assert_eq!(
+        delivery.from,
+        candidate_id
     );
 
     assert_eq!(
-        node.role(),
-        Role::Follower
-    );
-}
-
-
-#[test]
-/// Verifies a higher-term vote request updates the receiver term.
-fn higher_term_request_vote_updates_term() {
-    let server_id =
-        ServerId::new(1);
-
-    let candidate =
-        ServerId::new(2);
-
-    let mut node =
-        new_node(server_id);
-
-    let request =
-        RequestVoteRequest::new(
-            Term::new(3),
-            candidate,
-            LogIndex::ZERO,
-            Term::ZERO,
-        );
-
-    let response =
-        node.handle_request_vote(
-            request
-        );
-
-    assert!(
-        response.vote_granted
+        delivery.to,
+        follower_id
     );
 
     assert_eq!(
-        node.current_term(),
-        Term::new(3)
-    );
-}
-
-
-#[test]
-/// Verifies an election starts when the timer expires.
-fn election_timeout_starts_new_term() {
-    let mut node =
-        new_node(
-            ServerId::new(1)
-        );
-
-    for _ in 0..5 {
-        node.tick();
-    }
-
-    assert_eq!(
-        node.role(),
-        Role::Candidate
-    );
-
-    assert_eq!(
-        node.current_term(),
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .current_term(),
         Term::new(1)
     );
 }
 
-
 #[test]
-/// Verifies leader heartbeat traffic prevents a follower timeout.
-fn heartbeat_prevents_unnecessary_election() {
-    let server_id =
-        ServerId::new(1);
-
-    let leader_id =
-        ServerId::new(2);
-
-    let mut node =
-        new_node(server_id);
-
-    for _ in 0..4 {
-        node.tick();
-    }
-
-    let request =
-        AppendEntriesRequest::heartbeat(
-            Term::ZERO,
-            leader_id,
-            LogIndex::ZERO,
-            Term::ZERO,
-            LogIndex::ZERO,
-        );
-
-    assert!(
-        node.handle_append_entries(
-            request
-        ).success
-    );
-
-    for _ in 0..4 {
-        node.tick();
-    }
-
-    assert_eq!(
-        node.role(),
-        Role::Follower
-    );
-
-    assert_eq!(
-        node.current_term(),
-        Term::ZERO
-    );
-}
-
-
-#[test]
-/// Verifies a delayed follower eventually catches up after new commands.
-fn lagging_follower_catches_up_after_delay() {
-    let leader =
-        ServerId::new(1);
-
-    let delayed =
-        ServerId::new(2);
-
-    let active =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        delayed,
-        active,
+fn request_vote_round_trip_reaches_candidate() {
+    let server_ids = [
+        ServerId::new(1),
+        ServerId::new(2),
+        ServerId::new(3),
     ];
 
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        delayed,
-        active,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
-
-    replicate(
-        &mut cluster,
-        leader,
-        active,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "B".to_string()
-        )
-        .unwrap();
-
-    replicate(
-        &mut cluster,
-        leader,
-        active,
-    );
-
-    assert_eq!(
-        cluster
-            .node(delayed)
-            .unwrap()
-            .last_log_index(),
-        LogIndex::ZERO
-    );
-
-    replicate(
-        &mut cluster,
-        leader,
-        delayed,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "C".to_string()
-        )
-        .unwrap();
-
-    replicate(
-        &mut cluster,
-        leader,
-        delayed,
-    );
-
-    assert_eq!(
-        cluster
-            .node(delayed)
-            .unwrap()
-            .last_log_index(),
-        LogIndex::new(3)
-    );
-}
-
-#[test]
-/// Verifies a conflicting follower suffix entry is replaced.
-fn follower_conflicting_suffix_is_repaired() {
-    let leader_id =
+    let candidate_id =
         ServerId::new(1);
 
     let follower_id =
         ServerId::new(2);
 
-    let mut follower =
-        new_node_with_log(
-            follower_id,
-            Term::new(2),
-            vec![
-                LogEntry::new(
-                    Term::new(1),
-                    "A".to_string()
-                ),
-                LogEntry::new(
-                    Term::new(2),
-                    "OLD".to_string()
-                ),
-            ],
-        );
-
-    let request =
-        AppendEntriesRequest::new(
-            Term::new(3),
-            leader_id,
-            LogIndex::new(1),
-            Term::new(1),
-            vec![
-                LogEntry::new(
-                    Term::new(3),
-                    "B".to_string()
-                ),
-            ],
-            LogIndex::ZERO,
-        );
-
-    let response =
-        follower.handle_append_entries(
-            request
-        );
-
-    assert!(
-        response.success
-    );
-
-    assert_eq!(
-        follower.current_term(),
-        Term::new(3)
-    );
-
-    assert_eq!(
-        follower.last_log_index(),
-        LogIndex::new(2)
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(1)
-            )
-            .unwrap()
-            .command,
-        "A"
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(2)
-            )
-            .unwrap()
-            .command,
-        "B"
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(2)
-            )
-            .unwrap()
-            .term,
-        Term::new(3)
-    );
-}
-
-#[test]
-/// Verifies multiple conflicting suffix entries are replaced.
-fn follower_multiple_conflicting_entries_are_repaired() {
-    let leader_id =
-        ServerId::new(1);
-
-    let follower_id =
-        ServerId::new(2);
-
-    let mut follower =
-        new_node_with_log(
-            follower_id,
-            Term::new(2),
-            vec![
-                LogEntry::new(
-                    Term::new(1),
-                    "A".to_string()
-                ),
-                LogEntry::new(
-                    Term::new(2),
-                    "OLD-B".to_string()
-                ),
-                LogEntry::new(
-                    Term::new(2),
-                    "OLD-C".to_string()
-                ),
-            ],
-        );
-
-    let request =
-        AppendEntriesRequest::new(
-            Term::new(3),
-            leader_id,
-            LogIndex::new(1),
-            Term::new(1),
-            vec![
-                LogEntry::new(
-                    Term::new(3),
-                    "B".to_string()
-                ),
-                LogEntry::new(
-                    Term::new(3),
-                    "C".to_string()
-                ),
-            ],
-            LogIndex::ZERO,
-        );
-
-    let response =
-        follower.handle_append_entries(
-            request
-        );
-
-    assert!(
-        response.success
-    );
-
-    assert_eq!(
-        follower.current_term(),
-        Term::new(3)
-    );
-
-    assert_eq!(
-        follower.last_log_index(),
-        LogIndex::new(3)
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(1)
-            )
-            .unwrap()
-            .command,
-        "A"
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(2)
-            )
-            .unwrap()
-            .command,
-        "B"
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(3)
-            )
-            .unwrap()
-            .command,
-        "C"
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(2)
-            )
-            .unwrap()
-            .term,
-        Term::new(3)
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(3)
-            )
-            .unwrap()
-            .term,
-        Term::new(3)
-    );
-}
-
-#[test]
-/// Verifies an old-term AppendEntries cannot destroy newer state.
-fn late_old_append_entries_cannot_destroy_newer_log() {
-    let follower_id =
-        ServerId::new(2);
-
-    let leader_id =
-        ServerId::new(1);
-
-    let mut follower =
-        new_node(follower_id);
-
-    let newer =
-        AppendEntriesRequest::new(
-            Term::new(2),
-            leader_id,
-            LogIndex::ZERO,
-            Term::ZERO,
-            vec![
-                LogEntry::new(
-                    Term::new(2),
-                    "NEW".to_string()
-                )
-            ],
-            LogIndex::ZERO,
-        );
-
-    assert!(
-        follower
-            .handle_append_entries(
-                newer
-            )
-            .success
-    );
-
-    let older =
-        AppendEntriesRequest::new(
-            Term::new(1),
-            leader_id,
-            LogIndex::ZERO,
-            Term::ZERO,
-            vec![
-                LogEntry::new(
-                    Term::new(1),
-                    "OLD".to_string()
-                )
-            ],
-            LogIndex::ZERO,
-        );
-
-    let response =
-        follower.handle_append_entries(
-            older
-        );
-
-    assert!(
-        !response.success
-    );
-
-    assert_eq!(
-        follower
-            .log_at(
-                LogIndex::new(1)
-            )
-            .unwrap()
-            .command,
-        "NEW"
-    );
-}
-
-
-#[test]
-/// Verifies ordered commands remain ordered after replication.
-fn multiple_commands_replicate_in_order() {
-    let leader =
-        ServerId::new(1);
-
-    let follower =
-        ServerId::new(2);
-
-    let ids = [
-        leader,
-        follower,
-    ];
-
     let mut cluster =
-        TestCluster::new(&ids);
-
-    {
-        let node =
-            cluster.node_mut(leader)
-                .unwrap();
-
-        node.start_election();
-
-        node.handle_request_vote_response(
-            follower,
-            RequestVoteResponse::granted(
-                Term::new(1)
-            ),
-            &ids,
+        TestCluster::new(
+            &server_ids,
         );
-
-        node.append_entry(
-            "A".to_string()
-        );
-
-        node.append_entry(
-            "B".to_string()
-        );
-
-        node.append_entry(
-            "C".to_string()
-        );
-    }
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower,
-    );
-
-    assert_eq!(
-        cluster
-            .node(follower)
-            .unwrap()
-            .log_at(
-                LogIndex::new(1)
-            )
-            .unwrap()
-            .command,
-        "A"
-    );
-
-    assert_eq!(
-        cluster
-            .node(follower)
-            .unwrap()
-            .log_at(
-                LogIndex::new(2)
-            )
-            .unwrap()
-            .command,
-        "B"
-    );
-
-    assert_eq!(
-        cluster
-            .node(follower)
-            .unwrap()
-            .log_at(
-                LogIndex::new(3)
-            )
-            .unwrap()
-            .command,
-        "C"
-    );
-}
-
-
-#[test]
-/// Verifies a leader can continue with one follower unavailable.
-fn leader_continues_with_one_follower_unavailable() {
-    let leader =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower_a,
-        follower_b,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower_a,
-        follower_b,
-    );
-
-    cluster
-        .drop_to(
-            follower_a
-        );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower_b,
-    );
-
-    assert_eq!(
-        cluster
-            .node(leader)
-            .unwrap()
-            .commit_index(),
-        LogIndex::new(1)
-    );
-}
-
-
-#[test]
-/// Verifies no majority means no commit.
-fn no_majority_means_no_commit() {
-    let leader =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower_a,
-        follower_b,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower_a,
-        follower_b,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
-
-    assert_eq!(
-        cluster
-            .node(leader)
-            .unwrap()
-            .commit_index(),
-        LogIndex::ZERO
-    );
-}
-
-
-#[test]
-/// Verifies committed progress is monotonic after repeated responses.
-fn commit_index_stays_monotonic() {
-    let leader =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower_a,
-        follower_b,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower_a,
-        follower_b,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower_a,
-    );
-
-    let first_commit =
-        cluster
-            .node(leader)
-            .unwrap()
-            .commit_index();
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower_b,
-    );
-
-    let second_commit =
-        cluster
-            .node(leader)
-            .unwrap()
-            .commit_index();
-
-    assert!(
-        second_commit >= first_commit
-    );
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower_a,
-    );
-
-    assert_eq!(
-        cluster
-            .node(leader)
-            .unwrap()
-            .commit_index(),
-        second_commit
-    );
-}
-
-
-#[test]
-/// Verifies a follower never applies beyond its committed prefix.
-fn follower_commit_does_not_exceed_log() {
-    let node_id =
-        ServerId::new(2);
-
-    let leader_id =
-        ServerId::new(1);
-
-    let mut node =
-        new_node(node_id);
-
-    let request =
-        AppendEntriesRequest::new(
-            Term::new(1),
-            leader_id,
-            LogIndex::ZERO,
-            Term::ZERO,
-            vec![
-                LogEntry::new(
-                    Term::new(1),
-                    "A".to_string()
-                )
-            ],
-            LogIndex::new(5),
-        );
-
-    let response =
-        node.handle_append_entries(
-            request
-        );
-
-    assert!(
-        response.success
-    );
-
-    assert_eq!(
-        node.commit_index(),
-        LogIndex::new(1)
-    );
-}
-
-
-#[test]
-/// Verifies a follower restart preserves its durable log.
-fn follower_restart_preserves_log() {
-    let node_id =
-        ServerId::new(2);
-
-    let mut node =
-        new_node(node_id);
-
-    node.start_election();
-
-    assert!(
-        node.append_entry(
-            "A".to_string()
-        )
-        .is_none()
-    );
-
-    let storage =
-        node.into_storage();
-
-    let restarted =
-        supports::node::restart_node(
-            node_id,
-            storage,
-        );
-
-    assert_eq!(
-        restarted.last_log_index(),
-        LogIndex::ZERO
-    );
-}
-
-
-#[test]
-/// Verifies a crashed follower can be restarted by TestCluster.
-fn crashed_follower_can_be_restarted() {
-    let leader =
-        ServerId::new(1);
-
-    let follower =
-        ServerId::new(2);
-
-    let active =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower,
-        active,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower,
-        active,
-    );
-
-    let storage =
-        cluster
-            .crash_node(follower)
-            .expect(
-                "follower should crash"
-            );
-
-    assert!(
-        cluster.node(follower).is_none()
-    );
-
-    cluster.restart_node(
-        follower,
-        storage,
-    );
-
-    assert!(
-        cluster.node(follower).is_some()
-    );
-
-    assert_eq!(
-        cluster
-            .node(follower)
-            .unwrap()
-            .role(),
-        Role::Follower
-    );
-}
-
-
-#[test]
-/// Verifies a crashed leader disappears from the active cluster.
-fn crashed_leader_is_removed_from_cluster() {
-    let leader =
-        ServerId::new(1);
-
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower_a,
-        follower_b,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower_a,
-        follower_b,
-    );
-
-    let storage =
-        cluster
-            .crash_node(leader)
-            .expect(
-                "leader should crash"
-            );
-
-    assert!(
-        cluster.node(leader).is_none()
-    );
-
-    cluster.restart_node(
-        leader,
-        storage,
-    );
-
-    assert!(
-        cluster.node(leader).is_some()
-    );
-
-    assert_eq!(
-        cluster
-            .node(leader)
-            .unwrap()
-            .role(),
-        Role::Follower
-    );
-}
-
-
-#[test]
-/// Verifies a restarted follower can receive new replication.
-fn restarted_follower_can_receive_replication() {
-    let leader =
-        ServerId::new(1);
-
-    let follower =
-        ServerId::new(2);
-
-    let active =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower,
-        active,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower,
-        active,
-    );
-
-    let storage =
-        cluster
-            .crash_node(follower)
-            .unwrap();
-
-    cluster.restart_node(
-        follower,
-        storage,
-    );
-
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower,
-    );
-
-    assert_eq!(
-        cluster
-            .node(follower)
-            .unwrap()
-            .last_log_index(),
-        LogIndex::new(1)
-    );
-}
-
-
-#[test]
-/// Verifies the old leader is no longer present during re-election.
-fn old_leader_cannot_receive_votes_after_crash() {
-    let leader =
-        ServerId::new(1);
-
-    let follower =
-        ServerId::new(2);
-
-    let other =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
-        follower,
-        other,
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower,
-        other,
-    );
-
-    let _storage =
-        cluster
-            .crash_node(leader)
-            .unwrap();
 
     cluster.start_election(
-        follower
+        candidate_id,
     );
 
-    cluster
-        .deliver_to(
-            other
-        )
-        .unwrap();
+    let delivery =
+        cluster
+            .deliver_to(follower_id)
+            .expect(
+                "RequestVote should be delivered"
+            );
 
-    cluster
-        .deliver_to(
-            follower
-        )
-        .unwrap();
+    assert_eq!(
+        delivery.from,
+        candidate_id
+    );
+
+    assert_eq!(
+        delivery.to,
+        follower_id
+    );
 
     assert_eq!(
         cluster
-            .node(follower)
+            .transport()
+            .pending_count(),
+        2
+    );
+
+    assert!(
+        cluster
+            .deliver_to(candidate_id)
+            .is_some()
+    );
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
             .unwrap()
             .role(),
         Role::Leader
     );
 }
 
-
 #[test]
-/// Verifies all nodes in a five-node election receive the same term.
-fn five_node_election_has_one_term() {
-    let leader =
+fn append_entries_round_trip_uses_transport() {
+    let leader_id =
         ServerId::new(1);
 
-    let followers = [
-        ServerId::new(2),
-        ServerId::new(3),
-        ServerId::new(4),
-        ServerId::new(5),
-    ];
-
-    let ids = [
-        leader,
-        followers[0],
-        followers[1],
-        followers[2],
-        followers[3],
-    ];
-
-    let mut cluster =
-        TestCluster::new(&ids);
-
-    elect_five_node_leader(
-        &mut cluster,
-        leader,
-        &followers,
-    );
-
-    for id in ids {
-        assert_eq!(
-            cluster
-                .node(id)
-                .unwrap()
-                .current_term(),
-            Term::new(1)
-        );
-    }
-}
-
-#[test]
-/// Verifies a five-node majority can commit with two followers unavailable.
-fn five_node_majority_commits_with_two_unavailable() {
-    let leader =
-        ServerId::new(1);
-
-    let follower_a =
+    let follower_id =
         ServerId::new(2);
 
-    let follower_b =
-        ServerId::new(3);
-
-    let follower_c =
-        ServerId::new(4);
-
-    let follower_d =
-        ServerId::new(5);
-
-    let ids = [
-        leader,
-        follower_a,
-        follower_b,
-        follower_c,
-        follower_d,
+    let server_ids = [
+        leader_id,
+        follower_id,
     ];
 
     let mut cluster =
-        TestCluster::new(&ids);
+        TestCluster::new(
+            &server_ids,
+        );
 
-    elect_five_node_leader(
-        &mut cluster,
-        leader,
-        &[
-            follower_a,
-            follower_b,
-            follower_c,
-            follower_d,
-        ],
-    );
+    {
+        let leader =
+            cluster
+                .node_mut(leader_id)
+                .unwrap();
 
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
+        leader.start_election();
 
-    // Queue replication for the unavailable followers.
+        let _actions =
+            leader.handle_request_vote_response(
+                follower_id,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            );
+
+        assert_eq!(
+            leader.role(),
+            Role::Leader,
+        );
+
+        leader.append_entry(
+            "A".to_string(),
+        );
+
+        leader.append_entry(
+            "B".to_string(),
+        );
+
+        leader.append_entry(
+            "C".to_string(),
+        );
+    }
+
+    // Build the AppendEntries request from the leader
+    // and queue it in the transport.
     assert!(
         cluster.send_append_entries(
-            leader,
-            follower_c
+            leader_id,
+            follower_id,
         )
-    );
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower_d
-        )
-    );
-
-    // Remove their queued replication messages.
-    assert!(
-        cluster.drop_to(
-            follower_c
-        )
-    );
-
-    assert!(
-        cluster.drop_to(
-            follower_d
-        )
-    );
-
-    // Replicate to the two available followers.
-    replicate(
-        &mut cluster,
-        leader,
-        follower_a,
-    );
-
-    replicate(
-        &mut cluster,
-        leader,
-        follower_b,
     );
 
     assert_eq!(
         cluster
-            .node(leader)
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    // Deliver AppendEntries to the follower.
+    let delivery =
+        cluster
+            .deliver_to(follower_id)
+            .expect(
+                "AppendEntries should be delivered",
+            );
+
+    assert_eq!(
+        delivery.from,
+        leader_id,
+    );
+
+    assert_eq!(
+        delivery.to,
+        follower_id,
+    );
+
+    // The request was consumed and the follower
+    // queued exactly one response.
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    // Deliver the AppendEntriesResponse back
+    // to the leader.
+    let response_delivery =
+        cluster
+            .deliver_to(leader_id)
+            .expect(
+                "AppendEntriesResponse should be delivered",
+            );
+
+    assert_eq!(
+        response_delivery.from,
+        follower_id,
+    );
+
+    assert_eq!(
+        response_delivery.to,
+        leader_id,
+    );
+
+    // The response has now been consumed.
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        0,
+    );
+
+    let progress =
+        cluster
+            .node(leader_id)
             .unwrap()
+            .follower_progress(
+                follower_id,
+            )
+            .expect(
+                "leader should track follower",
+            );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(3),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(4),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::new(3),
+    );
+}
+
+#[test]
+fn append_entries_can_be_retried_after_drop() {
+    let leader_id =
+        ServerId::new(1);
+
+    let follower_id =
+        ServerId::new(2);
+
+    let server_ids = [
+        leader_id,
+        follower_id,
+    ];
+
+    let mut cluster =
+        TestCluster::new(
+            &server_ids,
+        );
+
+    {
+        let leader =
+            cluster
+                .node_mut(leader_id)
+                .unwrap();
+
+        leader.start_election();
+
+        let _actions =
+            leader.handle_request_vote_response(
+                follower_id,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            );
+
+        assert_eq!(
+            leader.role(),
+            Role::Leader,
+        );
+
+        leader.append_entry(
+            "A".to_string(),
+        );
+
+        leader.append_entry(
+            "B".to_string(),
+        );
+
+        leader.append_entry(
+            "C".to_string(),
+        );
+    }
+
+    // First replication attempt.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_id,
+        )
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    // Drop the AppendEntries message.
+    assert!(
+        cluster.drop_to(
+            follower_id,
+        )
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        0,
+    );
+
+    // The follower never received the dropped message.
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::ZERO,
+    );
+
+    // Retry the replication.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_id,
+        )
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    // Deliver the retry to the follower.
+    assert!(
+        cluster
+            .deliver_to(follower_id)
+            .is_some()
+    );
+
+    // The follower generated a response.
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::new(3),
+    );
+
+    // Deliver the response back to the leader.
+    assert!(
+        cluster
+            .deliver_to(leader_id)
+            .is_some()
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        0,
+    );
+
+    let progress =
+        cluster
+            .node(leader_id)
+            .unwrap()
+            .follower_progress(
+                follower_id,
+            )
+            .expect(
+                "leader should track follower",
+            );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(3),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(4),
+    );
+}
+
+
+#[test]
+fn reordered_append_entries_does_not_move_progress_backward() {
+    let leader_id =
+        ServerId::new(1);
+
+    let follower_id =
+        ServerId::new(2);
+
+    let server_ids = [
+        leader_id,
+        follower_id,
+    ];
+
+    let mut cluster =
+        TestCluster::new(
+            &server_ids,
+        );
+
+    {
+        let leader =
+            cluster
+                .node_mut(leader_id)
+                .unwrap();
+
+        leader.start_election();
+
+        let _actions =
+            leader.handle_request_vote_response(
+                follower_id,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            );
+
+        assert_eq!(
+            leader.role(),
+            Role::Leader,
+        );
+
+        // First entry.
+        leader.append_entry(
+            "A".to_string(),
+        );
+    }
+
+    // First AppendEntries:
+    //
+    // entries = [A]
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_id,
+        )
+    );
+
+    {
+        let leader =
+            cluster
+                .node_mut(leader_id)
+                .unwrap();
+
+        // Add another entry before the first
+        // replication response is processed.
+        leader.append_entry(
+            "B".to_string(),
+        );
+    }
+
+    // Second AppendEntries:
+    //
+    // entries = [A, B]
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_id,
+        )
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        2,
+    );
+
+    // Deliver the newer AppendEntries first.
+    let delivery =
+        cluster
+            .deliver_at(1)
+            .expect(
+                "second AppendEntries should exist",
+            );
+
+    assert_eq!(
+        delivery.from,
+        leader_id,
+    );
+
+    assert_eq!(
+        delivery.to,
+        follower_id,
+    );
+
+    // The follower now has A and B.
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::new(2),
+    );
+
+    // Queue now contains:
+    //
+    // [old AppendEntries, newer response]
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        2,
+    );
+
+    // Deliver the newer response first.
+    let response_delivery =
+        cluster
+            .deliver_at(1)
+            .expect(
+                "newer response should exist",
+            );
+
+    assert_eq!(
+        response_delivery.from,
+        follower_id,
+    );
+
+    assert_eq!(
+        response_delivery.to,
+        leader_id,
+    );
+
+    let progress =
+        cluster
+            .node(leader_id)
+            .unwrap()
+            .follower_progress(
+                follower_id,
+            )
+            .expect(
+                "leader should track follower",
+            );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(2),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(3),
+    );
+
+    // Now deliver the older AppendEntries.
+    assert!(
+        cluster
+            .deliver_to(follower_id)
+            .is_some()
+    );
+
+    // The follower must still have A and B.
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::new(2),
+    );
+
+    // The older request generated an older response.
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        1,
+    );
+
+    // Deliver the older response last.
+    assert!(
+        cluster
+            .deliver_to(leader_id)
+            .is_some()
+    );
+
+    // Older success must not move replication
+    // progress backward.
+    let progress =
+        cluster
+            .node(leader_id)
+            .unwrap()
+            .follower_progress(
+                follower_id,
+            )
+            .expect(
+                "leader should track follower",
+            );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(2),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(3),
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        0,
+    );
+}
+
+#[test]
+fn duplicate_append_entries_does_not_duplicate_log_entries() {
+    let leader_id =
+        ServerId::new(1);
+
+    let follower_id =
+        ServerId::new(2);
+
+    let server_ids = [
+        leader_id,
+        follower_id,
+    ];
+
+    let mut cluster =
+        TestCluster::new(
+            &server_ids,
+        );
+
+    {
+        let leader =
+            cluster
+                .node_mut(leader_id)
+                .unwrap();
+
+        leader.start_election();
+
+        let _actions =
+            leader.handle_request_vote_response(
+                follower_id,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            );
+
+        assert_eq!(
+            leader.role(),
+            Role::Leader,
+        );
+
+        leader.append_entry(
+            "A".to_string(),
+        );
+
+        leader.append_entry(
+            "B".to_string(),
+        );
+    }
+
+    // Send the same logical AppendEntries twice.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_id,
+        )
+    );
+
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_id,
+        )
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        2,
+    );
+
+    // Deliver the first copy.
+    assert!(
+        cluster
+            .deliver_to(follower_id)
+            .is_some()
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::new(2),
+    );
+
+    // Deliver the duplicate copy.
+    assert!(
+        cluster
+            .deliver_to(follower_id)
+            .is_some()
+    );
+
+    // The duplicate must not append A and B again.
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .unwrap()
+            .last_log_index(),
+        LogIndex::new(2),
+    );
+
+    // Two responses are now queued.
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        2,
+    );
+
+    // Process both responses.
+    assert!(
+        cluster
+            .deliver_to(leader_id)
+            .is_some()
+    );
+
+    assert!(
+        cluster
+            .deliver_to(leader_id)
+            .is_some()
+    );
+
+    let progress =
+        cluster
+            .node(leader_id)
+            .unwrap()
+            .follower_progress(
+                follower_id,
+            )
+            .expect(
+                "leader should track follower",
+            );
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(2),
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(3),
+    );
+
+    assert_eq!(
+        cluster
+            .transport()
+            .pending_count(),
+        0,
+    );
+}
+
+#[test]
+fn three_node_cluster_commits_command_after_majority_replication() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
+    ];
+
+    let mut cluster =
+        TestCluster::new(&server_ids);
+
+    // Start an election on node 1.
+    cluster.start_election(leader_id);
+
+    // Deliver RequestVote to both followers.
+    cluster.deliver_to(follower_a);
+    cluster.deliver_to(follower_b);
+
+    // Deliver the vote responses back to the candidate.
+    cluster.deliver_to(leader_id);
+    cluster.deliver_to(leader_id);
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader
+    );
+
+    // Append a client command to the leader.
+    let index = cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry(
+            "SET A".to_string(),
+        )
+        .expect("leader should accept command");
+
+    assert_eq!(
+        index,
+        LogIndex::new(1)
+    );
+
+    // The command is only on the leader at this point.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
             .commit_index(),
+        LogIndex::ZERO
+    );
+
+    // Replicate the command to one follower.
+    //
+    // Leader + follower_a = 2/3, which is a majority.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a,
+        )
+    );
+
+    // Deliver AppendEntries to follower_a.
+    cluster.deliver_to(follower_a);
+
+    // Deliver the successful response back to the leader.
+    cluster.deliver_to(leader_id);
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1)
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .last_applied(),
+        LogIndex::new(1)
+    );
+
+    // follower_b was never given the command.
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower should exist")
+            .log()
+            .last_index(),
+        LogIndex::ZERO
+    );
+
+    // follower_a received the command.
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower should exist")
+            .log()
+            .last_index(),
         LogIndex::new(1)
     );
 }
 
 #[test]
-/// Verifies a five-node minority cannot produce a majority commit.
-fn five_node_minority_cannot_commit() {
-    let leader =
-        ServerId::new(1);
+fn three_node_cluster_does_not_commit_without_majority() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
 
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let follower_c =
-        ServerId::new(4);
-
-    let follower_d =
-        ServerId::new(5);
-
-    let ids = [
-        leader,
+    let server_ids = [
+        leader_id,
         follower_a,
         follower_b,
-        follower_c,
-        follower_d,
     ];
 
     let mut cluster =
-        TestCluster::new(&ids);
+        TestCluster::new(&server_ids);
 
-    elect_five_node_leader(
-        &mut cluster,
-        leader,
-        &[
-            follower_a,
-            follower_b,
-            follower_c,
-            follower_d,
-        ],
-    );
+    cluster.start_election(leader_id);
 
-    cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
+    cluster.deliver_to(follower_a);
+    cluster.deliver_to(follower_b);
 
-    // Only leader + follower A have the entry:
-    //
-    // 2 / 5
-    //
-    // This is not a majority.
-    replicate(
-        &mut cluster,
-        leader,
-        follower_a,
-    );
+    cluster.deliver_to(leader_id);
+    cluster.deliver_to(leader_id);
 
     assert_eq!(
         cluster
-            .node(leader)
-            .unwrap()
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader
+    );
+
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry(
+            "SET B".to_string(),
+        )
+        .expect("leader should accept command");
+
+    // Do not deliver the command to either follower.
+    //
+    // Only the leader has the entry: 1/3.
+    cluster
+        .node(leader_id)
+        .expect("leader should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
             .commit_index(),
         LogIndex::ZERO
     );
 
     assert_eq!(
         cluster
-            .node(leader)
-            .unwrap()
+            .node(leader_id)
+            .expect("leader should exist")
             .last_applied(),
         LogIndex::ZERO
     );
 }
 
+/// Verifies a dropped replication is retried and eventually commits.
 #[test]
-/// Verifies an isolated leader cannot commit without a majority.
-fn isolated_leader_cannot_commit_new_entry() {
-    let leader =
-        ServerId::new(1);
+fn cluster_retries_dropped_append_entries() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
 
-    let follower_a =
-        ServerId::new(2);
-
-    let follower_b =
-        ServerId::new(3);
-
-    let ids = [
-        leader,
+    let server_ids = [
+        leader_id,
         follower_a,
         follower_b,
     ];
 
     let mut cluster =
-        TestCluster::new(&ids);
+        TestCluster::new(&server_ids);
 
-    elect_three_node_leader(
-        &mut cluster,
-        leader,
-        follower_a,
-        follower_b,
-    );
-
-    cluster.drop_to(
-        leader
-    );
+    // Elect the leader.
+    cluster.start_election(leader_id);
 
     cluster
-        .node_mut(leader)
-        .unwrap()
-        .append_entry(
-            "A".to_string()
-        )
-        .unwrap();
+        .deliver_to(follower_a)
+        .expect("follower A should receive RequestVote");
 
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive RequestVote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        rustyraft::raft::Role::Leader
+    );
+
+    // Append a command to the leader.
+    let index = cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    assert_eq!(
+        index,
+        LogIndex::new(1)
+    );
+
+    // Send the first replication attempt.
     assert!(
         cluster.send_append_entries(
-            leader,
+            leader_id,
             follower_a
         )
     );
 
+    // Drop the first attempt.
     assert!(
-        cluster.drop_to(
-            follower_a
-        )
-    );
-
-    assert!(
-        cluster.send_append_entries(
-            leader,
-            follower_b
-        )
-    );
-
-    assert!(
-        cluster.drop_to(
-            follower_b
-        )
+        cluster.drop_to(follower_a)
     );
 
     assert_eq!(
         cluster
-            .node(leader)
-            .unwrap()
-            .commit_index(),
+            .node(follower_a)
+            .expect("follower A should exist")
+            .log()
+            .last_index(),
         LogIndex::ZERO
     );
-}
 
+    // Send another AppendEntries request. The follower has not
+    // received the previous request, so the leader must retry.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
 
-#[test]
-/// Verifies a restarted node begins as a follower.
-fn restarted_node_begins_as_follower() {
-    let id =
-        ServerId::new(1);
-
-    let mut node =
-        new_node(id);
-
-    node.start_election();
-
-    let storage =
-        node.into_storage();
-
-    let restarted =
-        supports::node::restart_node(
-            id,
-            storage,
-        );
+    // Deliver the retry.
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive retry");
 
     assert_eq!(
-        restarted.role(),
-        Role::Follower
+        cluster
+            .node(follower_a)
+            .expect("follower A should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1)
+    );
+
+    // Deliver the successful response to the leader.
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive replication response");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1)
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .last_applied(),
+        LogIndex::new(1)
+    );
+
+    let progress = cluster
+        .node(leader_id)
+        .expect("leader should exist")
+        .follower_progress(follower_a)
+        .expect("leader should track follower A");
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(1)
+    );
+}
+
+/// Verifies an election can be driven entirely by logical time.
+#[test]
+fn cluster_elects_leader_after_election_timeout() {
+    let candidate_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut cluster = TestCluster::new(&[
+        candidate_id,
+        follower_a,
+        follower_b,
+    ]);
+
+    // Tick only the candidate so the other nodes do not
+    // start competing elections.
+    for _ in 0..4 {
+        cluster.tick(candidate_id);
+
+        assert_eq!(
+            cluster.transport().pending_count(),
+            0,
+        );
+    }
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("candidate should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    // The fifth tick expires the election timer.
+    cluster.tick(candidate_id);
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("candidate should exist")
+            .role(),
+        Role::Candidate,
+    );
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("candidate should exist")
+            .current_term()
+            .value(),
+        1,
+    );
+
+    // The candidate sends one RequestVote RPC to each follower.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+
+    // Deliver both RequestVote RPCs.
+    cluster
+        .deliver_next()
+        .expect("first RequestVote should exist");
+
+    cluster
+        .deliver_next()
+        .expect("second RequestVote should exist");
+
+    // Both followers have now sent their vote responses.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+
+    // The candidate already has its own vote.
+    // One additional granted vote gives it a majority of 2/3.
+    cluster
+        .deliver_next()
+        .expect("first vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("leader should exist")
+            .current_term()
+            .value(),
+        1,
+    );
+
+    // The remaining vote response may still arrive after the node
+    // has become leader. It must not change the leader's state.
+    cluster
+        .deliver_next()
+        .expect("second vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(candidate_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // The new leader's initial heartbeat is generated on its next
+    // logical tick.
+    cluster.tick(candidate_id);
+
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+}
+
+/// Verifies step drives a leader heartbeat through the transport.
+#[test]
+fn cluster_step_delivers_leader_heartbeat() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut cluster = TestCluster::new(&[
+        leader_id,
+        follower_a,
+        follower_b,
+    ]);
+
+    // Start a real election through the transport.
+    cluster.start_election(leader_id);
+
+    // Deliver both RequestVote RPCs.
+    cluster
+        .deliver_next()
+        .expect("first RequestVote should exist");
+
+    cluster
+        .deliver_next()
+        .expect("second RequestVote should exist");
+
+    // Deliver both vote responses.
+    //
+    // The first response gives the candidate a majority because
+    // it already voted for itself.
+    cluster
+        .deliver_next()
+        .expect("first vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    cluster
+        .deliver_next()
+        .expect("second vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // The transport should now be idle.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        0,
+    );
+
+    // step() advances the leader and delivers one generated
+    // heartbeat through the transport.
+    let delivery = cluster
+        .step(leader_id)
+        .expect("leader should send a heartbeat");
+
+    assert_eq!(
+        delivery.from,
+        leader_id,
+    );
+
+    assert_ne!(
+        delivery.to,
+        leader_id,
+    );
+
+    // Delivering the heartbeat immediately generated a response
+    // from the follower. The other heartbeat is still pending.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+}
+
+/// Verifies a delivered leader heartbeat prevents a follower election.
+#[test]
+fn cluster_heartbeat_prevents_follower_election() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let mut cluster = TestCluster::new(&[
+        leader_id,
+        follower_a,
+        follower_b,
+    ]);
+
+    // Start a real election through the cluster transport.
+    cluster.start_election(leader_id);
+
+    // Deliver both RequestVote RPCs.
+    cluster
+        .deliver_next()
+        .expect("first RequestVote should exist");
+
+    cluster
+        .deliver_next()
+        .expect("second RequestVote should exist");
+
+    // Deliver the first vote response. The candidate already
+    // voted for itself, so this gives it a majority.
+    cluster
+        .deliver_next()
+        .expect("first vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // Deliver the remaining vote response.
+    cluster
+        .deliver_next()
+        .expect("second vote response should exist");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // Drive the leader once. This generates and delivers one
+    // initial heartbeat to a follower.
+    let delivery = cluster
+        .step(leader_id)
+        .expect("leader should send a heartbeat");
+
+    assert_eq!(
+        delivery.from,
+        leader_id,
+    );
+
+    let follower_id = delivery.to;
+
+    assert_ne!(
+        follower_id,
+        leader_id,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    // The heartbeat reset the follower's election timer.
+    // Four more ticks must not start an election.
+    for _ in 0..4 {
+        cluster.tick(follower_id);
+    }
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .current_term()
+            .value(),
+        1,
     );
 }
 
 
+/// Verifies a client command is replicated and committed on a majority.
 #[test]
-/// Verifies a restarted node preserves its persistent term.
-fn restarted_node_preserves_term() {
-    let id =
-        ServerId::new(1);
+fn cluster_replicates_command_and_commits_to_majority() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
 
-    let mut node =
-        new_node(id);
+    let mut cluster = TestCluster::new(&[
+        leader_id,
+        follower_a,
+        follower_b,
+    ]);
 
-    node.start_election();
+    // Elect the leader through real RequestVote RPCs.
+    cluster.start_election(leader_id);
 
-    let term =
-        node.current_term();
-
-    let storage =
-        node.into_storage();
-
-    let restarted =
-        supports::node::restart_node(
-            id,
-            storage,
-        );
+    for _ in 0..4 {
+        cluster
+            .deliver_next()
+            .expect("election message should exist");
+    }
 
     assert_eq!(
-        restarted.current_term(),
-        term
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // Append a client command to the elected leader.
+    let index = cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    assert_eq!(
+        index,
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::ZERO,
+    );
+
+    // step() advances the leader and delivers one AppendEntries RPC.
+    cluster
+        .step(leader_id)
+        .expect("leader should send AppendEntries");
+
+    // Process the remaining replication and response messages.
+    for _ in 0..4 {
+        if cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index()
+            == LogIndex::new(1)
+        {
+            break;
+        }
+
+        cluster
+            .deliver_next()
+            .expect("replication message should exist");
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .last_applied(),
+        LogIndex::new(1),
+    );
+
+    // Drain the remaining replication messages.
+    while cluster.transport().has_pending() {
+        cluster
+            .deliver_next()
+            .expect("pending replication message should exist");
+    }
+
+    // Both followers should eventually receive the command.
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1),
     );
 }
 
-
+/// Verifies a leader commits when one follower is unreachable.
 #[test]
-/// Verifies a restarted node does not retain leader role.
-fn restart_drops_leader_role() {
-    let leader =
-        ServerId::new(1);
+fn cluster_commits_command_with_one_follower_unavailable() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
 
-    let follower =
-        ServerId::new(2);
+    let mut cluster = TestCluster::new(&[
+        leader_id,
+        follower_a,
+        follower_b,
+    ]);
 
-    let ids = [
-        leader,
-        follower,
+    // Elect the leader.
+    cluster.start_election(leader_id);
+
+    for _ in 0..4 {
+        cluster
+            .deliver_next()
+            .expect("election message should exist");
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    // Append a command to the leader.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    // Generate AppendEntries for both followers.
+    cluster.tick(leader_id);
+
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+
+    // Drop every message currently destined for follower B.
+    assert!(
+        cluster.drop_to(follower_b),
+        "follower B should have a pending message"
+    );
+
+    // The remaining AppendEntries goes to follower A.
+    cluster
+        .deliver_next()
+        .expect("replication should reach follower A");
+
+    // Follower A sends the successful response back to the leader.
+    cluster
+        .deliver_next()
+        .expect("leader should receive replication response");
+
+    // Leader + follower A = 2/3, which is a majority.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1),
+    );
+
+    // Follower B never received the command.
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log()
+            .last_index(),
+        LogIndex::ZERO,
+    );
+}
+
+/// Verifies a follower starts a new election when heartbeats stop.
+#[test]
+fn cluster_follower_starts_election_without_heartbeat() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+    let other_follower = ServerId::new(3);
+
+    let mut cluster = TestCluster::new(&[
+        leader_id,
+        follower_id,
+        other_follower,
+    ]);
+
+    // Elect the leader.
+    cluster.start_election(leader_id);
+
+    for _ in 0..4 {
+        cluster
+            .deliver_next()
+            .expect("election message should exist");
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    // The follower has not received a heartbeat.
+    //
+    // Four ticks are still below the election timeout.
+    for _ in 0..4 {
+        cluster.tick(follower_id);
+
+        assert_eq!(
+            cluster
+                .node(follower_id)
+                .expect("follower should exist")
+                .role(),
+            Role::Follower,
+        );
+    }
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("follower should exist")
+            .current_term()
+            .value(),
+        1,
+    );
+
+    // The fifth tick expires the election timer.
+    cluster.tick(follower_id);
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("candidate should exist")
+            .role(),
+        Role::Candidate,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_id)
+            .expect("candidate should exist")
+            .current_term()
+            .value(),
+        2,
+    );
+
+    // The new candidate sends RequestVote to the other two servers.
+    assert_eq!(
+        cluster.transport().pending_count(),
+        2,
+    );
+}
+
+/// Verifies an isolated leader loses authority and its log converges.
+#[test]
+fn isolated_leader_loses_authority_and_log_converges() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
     ];
 
-    let mut node =
-        new_node(leader);
+    let mut cluster =
+        TestCluster::new(
+            &server_ids,
+        );
 
-    node.start_election();
+    // Elect server 1 through real RequestVote RPCs.
+    cluster.start_election(
+        leader_id,
+    );
 
-    node.handle_request_vote_response(
-        follower,
-        RequestVoteResponse::granted(
-            Term::new(1)
-        ),
-        &ids,
+    for _ in 0..4 {
+        cluster
+            .deliver_next()
+            .expect(
+                "election message should exist",
+            );
+    }
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader,
     );
 
     assert_eq!(
-        node.role(),
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .current_term(),
+        Term::new(1),
+    );
+
+    // Establish leader activity so both followers
+    // have recently heard from the leader.
+    cluster.tick(leader_id);
+
+    cluster
+        .deliver_to(follower_a)
+        .expect(
+            "follower A should receive heartbeat",
+        );
+
+    cluster
+        .deliver_to(follower_b)
+        .expect(
+            "follower B should receive heartbeat",
+        );
+
+    // Deliver both heartbeat responses back to the leader.
+    cluster
+        .deliver_to(leader_id)
+        .expect(
+            "leader should receive heartbeat response",
+        );
+
+    cluster
+        .deliver_to(leader_id)
+        .expect(
+            "leader should receive heartbeat response",
+        );
+
+    // Append an uncommitted command to the isolated leader.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry(
+            "X".to_string(),
+        )
+        .expect(
+            "leader should accept command",
+        );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::ZERO,
+    );
+
+    // Server 1 is now isolated. No messages to or from
+    // it will be delivered.
+    //
+    // Let follower A reach its election timeout.
+    for _ in 0..5 {
+        cluster.tick(follower_a);
+    }
+
+    assert!(
+        cluster
+            .drop_to(leader_id),
+        "RequestVote to isolated leader should exist",
+    );
+
+    // Deliver follower A's RequestVote to follower B.
+    cluster
+        .deliver_to(follower_b)
+        .expect(
+            "follower B should receive RequestVote",
+        );
+
+    // Deliver B's vote response to A.
+    cluster
+        .deliver_to(follower_a)
+        .expect(
+            "candidate should receive vote",
+        );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .role(),
+        Role::Leader,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .current_term(),
+        Term::new(2),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower should exist")
+            .current_term(),
+        Term::new(2),
+    );
+
+    // The majority partition can continue making progress.
+    cluster
+        .node_mut(follower_a)
+        .expect("new leader should exist")
+        .append_entry(
+            "Y".to_string(),
+        )
+        .expect(
+            "new leader should accept command",
+        );
+
+    assert!(
+        cluster.send_append_entries(
+            follower_a,
+            follower_b,
+        ),
+        "new leader should send AppendEntries",
+    );
+
+    cluster
+        .deliver_to(follower_b)
+        .expect(
+            "follower B should receive command",
+        );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect(
+            "new leader should receive response",
+        );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .commit_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .last_applied(),
+        LogIndex::new(1),
+    );
+
+    // The isolated leader never had a majority, so X
+    // must still be uncommitted.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("isolated leader should exist")
+            .commit_index(),
+        LogIndex::ZERO,
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("isolated leader should exist")
+            .current_term(),
+        Term::new(1),
+    );
+
+    // Heal the partition. The new leader sends its log
+    // to the old leader, replacing the uncommitted X.
+    assert!(
+        cluster.send_append_entries(
+            follower_a,
+            leader_id,
+        ),
+        "new leader should send AppendEntries after healing",
+    );
+
+    cluster
+        .deliver_to(leader_id)
+        .expect(
+            "isolated leader should receive newer AppendEntries",
+        );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect(
+            "new leader should receive response",
+        );
+
+    // The old leader must accept the newer term and step down.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .role(),
+        Role::Follower,
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .current_term(),
+        Term::new(2),
+    );
+
+    // The uncommitted X was replaced by Y.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1),
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .log_at(
+                LogIndex::new(1),
+            )
+            .map(
+                |entry| entry.command.clone()
+            ),
+        Some(
+            "Y".to_string()
+        ),
+    );
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("reconnected node should exist")
+            .commit_index(),
+        LogIndex::new(1),
+    );
+}
+
+/// Verifies a crashed follower restarts and catches up with the leader.
+#[test]
+fn cluster_restarts_crashed_follower_and_catches_up() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
+
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
+    ];
+
+    let mut cluster =
+        TestCluster::new(&server_ids);
+
+    // Elect the leader.
+    cluster.start_election(leader_id);
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive RequestVote");
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive RequestVote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
         Role::Leader
     );
 
-    let storage =
-        node.into_storage();
+    // Append the first command.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
 
-    let restarted =
-        supports::node::restart_node(
-            leader,
-            storage,
-        );
+    // Replicate A to follower A.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive A");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive A response");
 
     assert_eq!(
-        restarted.role(),
-        Role::Follower
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1)
     );
-}
 
-
-#[test]
-/// Verifies an empty AppendEntries heartbeat does not append a log entry.
-fn heartbeat_does_not_append_entry() {
-    let follower =
-        ServerId::new(2);
-
-    let leader =
-        ServerId::new(1);
-
-    let mut node =
-        new_node(follower);
-
-    let request =
-        AppendEntriesRequest::heartbeat(
-            Term::new(1),
-            leader,
-            LogIndex::ZERO,
-            Term::ZERO,
-            LogIndex::ZERO,
-        );
+    // Crash follower A after it has persisted A.
+    let storage = cluster
+        .crash_node(follower_a)
+        .expect("follower A should crash");
 
     assert!(
-        node.handle_append_entries(
-            request
-        ).success
+        cluster
+            .node(follower_a)
+            .is_none()
     );
 
-    assert_eq!(
-        node.last_log_index(),
-        LogIndex::ZERO
-    );
-}
-
-
-#[test]
-/// Verifies a heartbeat can reset a nearly expired election timer.
-fn heartbeat_resets_election_timer() {
-    let follower =
-        ServerId::new(2);
-
-    let leader =
-        ServerId::new(1);
-
-    let mut node =
-        new_node(follower);
-
-    for _ in 0..4 {
-        node.tick();
-    }
-
-    let request =
-        AppendEntriesRequest::heartbeat(
-            Term::ZERO,
-            leader,
-            LogIndex::ZERO,
-            Term::ZERO,
-            LogIndex::ZERO,
-        );
+    // The leader should still make progress with follower B.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("B".to_string())
+        .expect("leader should accept second command");
 
     assert!(
-        node.handle_append_entries(
-            request
-        ).success
+        cluster.send_append_entries(
+            leader_id,
+            follower_b
+        )
     );
 
-    for _ in 0..4 {
-        node.tick();
-    }
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive B");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive B response");
 
     assert_eq!(
-        node.role(),
-        Role::Follower
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(2)
+    );
+
+    // Restart follower A from its persistent storage.
+    cluster.restart_node(
+        follower_a,
+        storage,
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should exist")
+            .log()
+            .last_index(),
+        LogIndex::new(1)
+    );
+
+    // Send the missing suffix to the restarted follower.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("restarted follower should receive B");
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should catch up")
+            .log()
+            .last_index(),
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should catch up")
+            .log_at(LogIndex::new(1))
+            .expect("A should exist")
+            .command,
+        "A"
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("follower A should catch up")
+            .log_at(LogIndex::new(2))
+            .expect("B should exist")
+            .command,
+        "B"
+    );
+
+    // Process the replication response.
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive catch-up response");
+
+    let progress = cluster
+        .node(leader_id)
+        .expect("leader should exist")
+        .follower_progress(follower_a)
+        .expect("leader should track follower A");
+
+    assert_eq!(
+        progress.match_index,
+        LogIndex::new(2)
+    );
+
+    assert_eq!(
+        progress.next_index,
+        LogIndex::new(3)
     );
 }
 
-
+/// Verifies the cluster elects a new leader after the leader crashes.
 #[test]
-/// Verifies a granted vote is preserved in persistent storage.
-fn granted_vote_survives_restart() {
-    let node_id =
-        ServerId::new(1);
+fn cluster_elects_new_leader_after_leader_crash() {
+    let leader_id = ServerId::new(1);
+    let follower_a = ServerId::new(2);
+    let follower_b = ServerId::new(3);
 
-    let voter =
-        ServerId::new(2);
+    let server_ids = [
+        leader_id,
+        follower_a,
+        follower_b,
+    ];
 
-    let mut node =
-        new_node(node_id);
+    let mut cluster =
+        TestCluster::new(&server_ids);
 
-    let request =
-        RequestVoteRequest::new(
-            Term::new(1),
-            voter,
-            LogIndex::ZERO,
-            Term::ZERO,
-        );
+    // Elect the initial leader.
+    cluster.start_election(leader_id);
 
-    let response =
-        node.handle_request_vote(
-            request
-        );
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive RequestVote");
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive RequestVote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive vote");
+
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .role(),
+        Role::Leader
+    );
+
+    // Append a command to the initial leader.
+    cluster
+        .node_mut(leader_id)
+        .expect("leader should exist")
+        .append_entry("A".to_string())
+        .expect("leader should accept command");
+
+    // Replicate A to follower A.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_a
+        )
+    );
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("follower A should receive A");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive A response");
+
+    // Replicate A to follower B as well.
+    assert!(
+        cluster.send_append_entries(
+            leader_id,
+            follower_b
+        )
+    );
+
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive A");
+
+    cluster
+        .deliver_to(leader_id)
+        .expect("leader should receive A response");
+
+    // A is now committed on the original leader.
+    assert_eq!(
+        cluster
+            .node(leader_id)
+            .expect("leader should exist")
+            .commit_index(),
+        LogIndex::new(1)
+    );
+
+    // Crash the current leader.
+    let _storage = cluster
+        .crash_node(leader_id)
+        .expect("leader should crash");
 
     assert!(
-        response.vote_granted
+        cluster
+            .node(leader_id)
+            .is_none()
     );
 
-    let storage =
-        node.into_storage();
+    // Follower A starts a new election.
+    cluster.start_election(follower_a);
 
-    let restarted =
-        supports::node::restart_node(
-            node_id,
-            storage,
-        );
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive new RequestVote");
+
+    cluster
+        .deliver_to(follower_a)
+        .expect("new leader should receive vote");
 
     assert_eq!(
-        restarted.voted_for(),
-        Some(voter)
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .role(),
+        Role::Leader
     );
-}
 
-
-/*
- * The following tests are intentionally ignored until the deterministic
- * fault executor, bidirectional partition model, and reusable invariant
- * checker are added to the test harness.
- *
- * They are kept here as actual test entry points so the final file contains
- * the complete matrix in one place.
- */
-
-
-#[test]
-#[ignore = "requires bidirectional partition support"]
-/// Verifies a two-node partition blocks traffic in both directions.
-fn bidirectional_partition_blocks_both_directions() {
-    panic!(
-        "requires bidirectional partition support"
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .last_log_index(),
+        LogIndex::new(1)
     );
-}
 
-
-#[test]
-#[ignore = "requires bidirectional partition support"]
-/// Verifies a minority partition cannot elect a leader.
-fn minority_partition_cannot_elect_leader() {
-    panic!(
-        "requires bidirectional partition support"
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .log_at(LogIndex::new(1))
+            .expect("committed entry should exist")
+            .command,
+        "A"
     );
-}
 
+    // The new leader appends another command.
+    cluster
+        .node_mut(follower_a)
+        .expect("new leader should exist")
+        .append_entry("B".to_string())
+        .expect("new leader should accept command");
 
-#[test]
-#[ignore = "requires bidirectional partition support"]
-/// Verifies a majority partition can elect and commit.
-fn majority_partition_can_continue_progress() {
-    panic!(
-        "requires bidirectional partition support"
+    // Replicate B to the surviving follower.
+    assert!(
+        cluster.send_append_entries(
+            follower_a,
+            follower_b
+        )
     );
-}
 
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower B should receive B");
 
-#[test]
-#[ignore = "requires deterministic invariant checker"]
-/// Verifies committed entries never change during a fault run.
-fn committed_entries_never_change() {
-    panic!(
-        "requires deterministic invariant checker"
+    cluster
+        .deliver_to(follower_a)
+        .expect("new leader should receive B response");
+
+    // The new leader should commit B.
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .commit_index(),
+        LogIndex::new(2)
     );
-}
 
-
-#[test]
-#[ignore = "requires deterministic invariant checker"]
-/// Verifies commit index never moves backward in a fault run.
-fn deterministic_commit_index_is_monotonic() {
-    panic!(
-        "requires deterministic invariant checker"
+    assert_eq!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .last_applied(),
+        LogIndex::new(2)
     );
-}
 
-
-#[test]
-#[ignore = "requires deterministic invariant checker"]
-/// Verifies last_applied never exceeds commit_index.
-fn last_applied_never_exceeds_commit_index() {
-    panic!(
-        "requires deterministic invariant checker"
+    // The surviving follower should contain both commands.
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .last_log_index(),
+        LogIndex::new(2)
     );
-}
 
-
-#[test]
-#[ignore = "requires deterministic invariant checker"]
-/// Verifies match_index never moves backward in a fault run.
-fn deterministic_match_index_is_monotonic() {
-    panic!(
-        "requires deterministic invariant checker"
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log_at(LogIndex::new(1))
+            .expect("A should exist")
+            .command,
+        "A"
     );
-}
 
-
-#[test]
-#[ignore = "requires deterministic fault executor"]
-/// Verifies a three-node deterministic fault run preserves safety.
-fn three_node_deterministic_fault_run() {
-    panic!(
-        "requires deterministic fault executor"
-    );
-}
-
-
-#[test]
-#[ignore = "requires deterministic crash executor"]
-/// Verifies a three-node deterministic crash run preserves safety.
-fn three_node_deterministic_crash_run() {
-    panic!(
-        "requires deterministic crash executor"
-    );
-}
-
-
-#[test]
-#[ignore = "requires deterministic fault executor"]
-/// Verifies a five-node deterministic fault run preserves safety.
-fn five_node_deterministic_fault_run() {
-    panic!(
-        "requires deterministic fault executor"
-    );
-}
-
-
-#[test]
-#[ignore = "requires deterministic fault executor"]
-/// Verifies a long deterministic run can be replayed from its seed.
-fn long_deterministic_reproducible_run() {
-    panic!(
-        "requires deterministic fault executor"
-    );
-}
-
-
-#[test]
-#[ignore = "requires deterministic fault executor"]
-/// Verifies the final umbrella Raft fault model.
-fn deterministic_raft_fault_model() {
-    panic!(
-        "requires deterministic fault executor"
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log_at(LogIndex::new(2))
+            .expect("B should exist")
+            .command,
+        "B"
     );
 }

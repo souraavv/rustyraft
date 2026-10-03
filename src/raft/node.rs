@@ -5,6 +5,7 @@
 //! by design we keep the network connections and timers outside the node
 //! and provide persistent storage through the storage abstraction.
 
+use crate::raft::action::RaftAction;
 use crate::raft::{HeartbeatTimer, LogEntry};
 use crate::raft::Role::{Follower};
 use crate::raft::commit::find_commit_index;
@@ -189,15 +190,17 @@ where
         )
     }
 
-    /// Hanldes a RequestVote RPC
-    /// 
-    /// The node owns the state changes required by the RPC while election
-    /// module owns the vote decision itself
+    /// Handles a RequestVote RPC.
+    ///
+    /// The node owns the state changes required by the RPC while the election
+    /// module owns the vote decision itself. The response is returned as a
+    /// RaftAction so the runtime can deliver it through the transport layer.
     pub fn handle_request_vote(
-        &mut self, 
-        request: RequestVoteRequest
-    ) -> RequestVoteResponse {
-       tracing::debug!(
+        &mut self,
+        from: ServerId,
+        request: RequestVoteRequest,
+    ) -> Vec<RaftAction<C>> {
+        tracing::debug!(
             server_id = self.id.value(),
             candidate_id = request.candidate_id.value(),
             candidate_term = request.term.value(),
@@ -205,8 +208,8 @@ where
             "Handling RequestVote"
         );
 
-        // A request from an older term is simply reject
-        // Receiver kept its current term and rejects the request
+        // A request from an older term is simply rejected.
+        // Receiver keeps its current term and rejects the request.
         if request.term < self.current_term() {
             tracing::debug!(
                 server_id = self.id.value(),
@@ -215,14 +218,20 @@ where
                 current_term = self.current_term().value(),
                 "Rejecting RequestVote from older term"
             );
-            return RequestVoteResponse::rejected(
-                self.current_term(),
-            );
+
+            return vec![
+                RaftAction::SendRequestVoteResponse {
+                    target: from,
+                    response: RequestVoteResponse::rejected(
+                        self.current_term(),
+                    ),
+                },
+            ];
         }
 
-        // A newer term means this node has stale Raft state
+        // A newer term means this node has stale Raft state.
         // Move to the newer term and clear the previous vote because
-        // votes are tracked independently for each terms
+        // votes are tracked independently for each term.
         if request.term > self.current_term() {
             tracing::info!(
                 server_id = self.id.value(),
@@ -235,12 +244,13 @@ where
                 request.term,
                 None,
             );
-            // I can't stay at any role including Leader (stale) 
-            // If i discover someone requesting vote for higher term
-            // I should de-promote my self as follower immediately on such
-            // events
+
+            // I can't stay at any role including Leader (stale).
+            // If I discover someone requesting a vote for a higher term,
+            // I should demote myself to follower immediately.
             self.role = Follower;
-            self.leader = None; 
+            self.leader = None;
+            self.election = None;
         }
 
         let grant_vote = should_grant_vote(
@@ -254,7 +264,7 @@ where
             self.last_log_term(),
         );
 
-        // election decided we can't vote to this candidate for this term
+        // Election decided we can't vote for this candidate for this term.
         if !grant_vote {
             tracing::debug!(
                 server_id = self.id.value(),
@@ -262,9 +272,15 @@ where
                 term = self.current_term().value(),
                 "Vote rejected"
             );
-            return RequestVoteResponse::rejected(
-                self.current_term(),
-            );
+
+            return vec![
+                RaftAction::SendRequestVoteResponse {
+                    target: from,
+                    response: RequestVoteResponse::rejected(
+                        self.current_term(),
+                    ),
+                },
+            ];
         }
 
         // The candidate passed all voting rules. Record the vote so this
@@ -274,9 +290,9 @@ where
             Some(request.candidate_id),
         );
 
-        // Granting a valid vote is election activity
-        // reset the timer so that follower does not immediately
-        // start another election
+        // Granting a valid vote is election activity.
+        // Reset the timer so that follower does not immediately
+        // start another election.
         self.election_timer.reset();
 
         tracing::info!(
@@ -286,22 +302,27 @@ where
             "Vote granted"
         );
 
-        RequestVoteResponse::granted(
-            self.current_term(),
-        )
+        vec![
+            RaftAction::SendRequestVoteResponse {
+                target: from,
+                response: RequestVoteResponse::granted(
+                    self.current_term(),
+                ),
+            },
+        ]
     }
 
     /// Handles a response to a RequestVote RPC.
-    /// 
+    ///
     /// A candidate records granted votes until it has majority
     /// A response from a newer term always cause the node to step down
     /// because its current term is stale
     pub fn handle_request_vote_response(
-        &mut self, 
+        &mut self,
         voter_id: ServerId,
         response: RequestVoteResponse,
         cluster_servers: &[ServerId],
-    ) {
+    ) -> Vec<RaftAction<C>> {
         tracing::debug!(
             server_id = self.id.value(),
             response_term = response.term.value(),
@@ -324,11 +345,12 @@ where
                 response.term,
                 None,
             );
+
             self.role = Role::Follower;
             self.leader = None;
             self.election = None;
 
-            return;
+            return Vec::new();
         }
 
         // Only the election belonging to our current term can affect
@@ -341,7 +363,7 @@ where
                 "Ignoring stale RequestVote response"
             );
 
-            return;
+            return Vec::new();
         }
 
         // A node that is no longer a candidate cannot use an old vote
@@ -353,7 +375,7 @@ where
                 "Ignoring vote response because node is not a candidate"
             );
 
-            return;
+            return Vec::new();
         }
 
         // A rejected vote does not change the election state. We keep
@@ -364,10 +386,10 @@ where
                 "Vote was not granted"
             );
 
-            return;
+            return Vec::new();
         }
 
-        // we are using { .. } so that we can borrow the election as mut 
+        // we are using { .. } so that we can borrow the election as mut
         // and end the borrow as soon as outer { } of this let has_majority
         // ends.. the method become_leader also mutate the election to None
         // so we can't have two writers.. to solve the we added simple scope
@@ -380,7 +402,8 @@ where
                         server_id = self.id.value(),
                         "Received vote without an active election"
                     );
-                    return;
+
+                    return Vec::new();
                 }
             };
 
@@ -392,6 +415,7 @@ where
             self.become_leader(cluster_servers);
         }
 
+        Vec::new()
     }
 
     /// Starts a new election
@@ -483,9 +507,108 @@ where
 
     }
 
+    // ------------------------------
+    // --------- Actions ------------
+    // ------------------------------
+    fn request_vote_actions(
+        &self,
+        cluster_servers: &[ServerId],
+    ) -> Vec<RaftAction<C>> {
+
+        // create a request vote request
+        let request = self.build_request_vote();
+
+        // iterate through the cluster server known to me and create
+        // an action (note with this change i added clone to the 
+        // requestvoterequest)
+        cluster_servers
+            .iter()
+            .copied()
+            .filter(|server_id| *server_id != self.id)
+            .map(|server_id| {
+                RaftAction::SendRequestVote {
+                    target: server_id,
+                    request: request.clone(),
+                }
+            })
+            .collect()
+    }
+
+    /// Build AppendEntries actions for all followers.
+    ///
+    /// AppendEntries is used both for heartbeats and for log replication.
+    /// The node decides when the requests are required and builds the
+    /// protocol actions. The runtime is responsible for executing them
+    /// through the transport.
+    pub fn append_entries_actions(
+        &mut self,
+    ) -> Vec<RaftAction<C>>
+    where
+        C: Clone,
+    {
+        // If I'm not a leader any more - stale network packet handling
+        if self.role != Role::Leader {
+            return Vec::new();
+        }
+
+        // If this is not the initial heartbeat and the heartbeat timer
+        // has not been expired yet then empty action
+        if !self.initial_heartbeat_pending
+            && !self.heartbeat_timer.expired()
+        {
+            return Vec::new();
+        }
+
+        // get the list of the followers
+        let follower_ids = match self.leader.as_ref() {
+            Some(leader) => leader.replication.follower_ids(),
+            None => {
+                tracing::warn!(
+                    server_id = self.id.value(),
+                    "Leader state missing while building AppendEntries actions"
+                );
+
+                return Vec::new();
+            }
+        };
+
+        let mut actions = Vec::new();
+
+        // Create a append entry action for each of the replica
+        // this action will be consumed by the RaftRuntime which then 
+        // will forward this to the transport layer
+        for follower_id in follower_ids {
+            if let Some(request) =
+                self.build_append_entries(follower_id)
+            {
+                actions.push(RaftAction::SendAppendEntries {
+                    target: follower_id,
+                    request,
+                });
+            }
+        }
+
+        // Sending append entry also has association with the the hearbeat
+        // we reset the hearbeat .. that way we dont overflood the hearbeat
+        // when we are already sending too many append entries
+        // AppendEntry request do reset the election timer on the candidates
+        // anyway
+        self.heartbeat_timer.reset();
+        self.initial_heartbeat_pending = false;
+
+        tracing::debug!(
+            server_id = self.id.value(),
+            append_entries_count = actions.len(),
+            "Built AppendEntries actions"
+        );
+
+        actions
+    }
+
     // -----------------------------------------------
     // ----------- Append Entries -------------------
     // ----------------------------------------------
+
     /// Handles an AppendEntries RPC from the leader.
     ///
     /// AppendEntries is used both for log replication and heartbeats.
@@ -493,9 +616,9 @@ where
     /// matches its own log before modifying anything.
     pub fn handle_append_entries(
         &mut self,
+        from: ServerId,
         request: AppendEntriesRequest<C>,
-    ) -> AppendEntriesResponse {
-
+    ) -> Vec<RaftAction<C>> {
         tracing::debug!(
             server_id = self.id.value(),
             leader_id = request.leader_id.value(),
@@ -517,9 +640,14 @@ where
                 "Rejecting AppendEntries from older term"
             );
 
-            return AppendEntriesResponse::failure(
-                self.current_term(),
-            );
+            return vec![
+                RaftAction::SendAppendEntriesResponse {
+                    target: from,
+                    response: AppendEntriesResponse::failure(
+                        self.current_term(),
+                    ),
+                },
+            ];
         }
 
         // A newer term means this node has stale state. Move to the
@@ -537,6 +665,7 @@ where
                 request.term,
                 None,
             );
+
             // reset back to the follower
             self.role = Role::Follower;
             self.leader = None;
@@ -591,21 +720,26 @@ where
 
                 // If our logs doesn't match I will simply reply the leader
                 // that I can proceed.. and this is where leader will start
-                // backtracking from nextIndex until it found.. and that's 
+                // backtracking from nextIndex until it found.. and that's
                 // where recovery start..
-                return AppendEntriesResponse::failure(
-                    self.current_term(),
-                );
+                return vec![
+                    RaftAction::SendAppendEntriesResponse {
+                        target: from,
+                        response: AppendEntriesResponse::failure(
+                            self.current_term(),
+                        ),
+                    },
+                ];
             }
         }
 
-        let entry_count =
-            request.entries.len();
+        let entry_count = request.entries.len();
+
         // The previous entry matches, so the leader and follower agree
         // up to this point. Reconcile the entries that follow it.
 
         // incoming entries: request.entries (one or many)
-        // They will go at prev_log_index + offset + 1 
+        // They will go at prev_log_index + offset + 1
         for (offset, entry) in request.entries.into_iter().enumerate() {
             let index = LogIndex::new(
                 request.prev_log_index.value()
@@ -614,8 +748,8 @@ where
             );
 
             // Fetch the term at the next log entry (log = Vec<LogEntry<C>>)
-            // each entry contains term and Command 
-            // we are interested in term at that index (start the current 
+            // each entry contains term and Command
+            // we are interested in term at that index (start the current
             // length which is essentially the prev_log_index provided
             // by the leader)
             match self.storage.log().term_at(index) {
@@ -665,6 +799,7 @@ where
                     request.leader_commit.value(),
                 "Advancing follower commit index"
             );
+
             self.volatile.commit_index = new_commit_index;
         }
 
@@ -705,10 +840,15 @@ where
             "AppendEntries accepted"
         );
 
-        AppendEntriesResponse::success(
-            self.current_term(),
-            replicated_index,
-        )
+        vec![
+            RaftAction::SendAppendEntriesResponse {
+                target: from,
+                response: AppendEntriesResponse::success(
+                    self.current_term(),
+                    replicated_index,
+                ),
+            },
+        ]
     }
 
     /// Build an AppendEntries request for a follower
@@ -733,16 +873,16 @@ where
         )
     }
 
-    /// Handles an AppendEntries resopnse from a follower 
-    /// 
+    /// Handles an AppendEntries resopnse from a follower
+    ///
     /// Successfull replication advances the follower progress (succes_progress)
-    /// Failed replication moves next_index backward so the leader 
-    /// can retry from an earlier log position 
+    /// Failed replication moves next_index backward so the leader
+    /// can retry from an earlier log position
     pub fn handle_append_entries_response(
-        &mut self, 
+        &mut self,
         follower_id: ServerId,
         response: AppendEntriesResponse,
-    ) {
+    ) -> Vec<RaftAction<C>> {
 
         if self.role != Role::Leader {
             tracing::debug!(
@@ -751,7 +891,7 @@ where
                 "Ignoring AppendEntries response because node is not leader"
             );
 
-            return;
+            return Vec::new();
         }
 
         // Some else become leader
@@ -759,7 +899,7 @@ where
         // state and must step down before processing the response.
         if response.term > self.current_term() {
             self.step_down_for_newer_term(response.term);
-            return;
+            return Vec::new();
         }
 
         // Stale network packets
@@ -773,7 +913,8 @@ where
                 current_term = self.current_term().value(),
                 "Ignoring stale AppendEntries response"
             );
-            return;
+
+            return Vec::new();
         }
 
         let leader = match self.leader.as_mut() {
@@ -784,7 +925,7 @@ where
                     "Leader state missing while handling response"
                 );
 
-                return;
+                return Vec::new();
             }
         };
 
@@ -805,6 +946,7 @@ where
             );
         }
 
+        Vec::new()
     }
 
     /// Appends a client command to the leader's log
@@ -968,94 +1110,45 @@ where
         Ok(())
     }
 
-    /// Every election timeout while remaining a candidate starts another
-    /// election, and every new electin has a strictly greater term than
-    /// previous one
-    /// 
-    /// Ticks takes the responsibility to reset the timer and no the election
-    pub fn tick(&mut self) {
-        
-        // A leader on tick increment its heartbeat timer.. it doesn't
-        // bother about the election timer.. election are driven by 
-        // follower not recieving hearbeats for a given timeout
+    pub fn tick(
+        &mut self,
+        cluster_servers: &[ServerId],
+    ) -> Vec<RaftAction<C>>
+    where
+        C: Clone,
+    {
+        // Leaders use the heartbeat timer. They do not participate
+        // in election timeout processing.
         if self.role == Role::Leader {
             self.heartbeat_timer.tick();
-            return;
+
+            if self.heartbeat_timer.expired()
+                || self.initial_heartbeat_pending
+            {
+                return self.append_entries_actions();
+            }
+
+            return Vec::new();
         }
 
-        // If I'm a follower or Candidate..
+        // Followers and candidates use the election timer.
         self.election_timer.tick();
 
-        // If I'm follower or a candidate a expired time leads to an
-        // election
-        if (self.role == Role::Follower || self.role == Role::Candidate) 
-            && self.election_timer.expired() 
-        {
-            tracing::info!(
-                server_id = self.id.value(),
-                term = self.current_term().value(),
-                role = ?self.role,
-                "Election timeout expired"
-            );
-
-            self.start_election();
-            self.election_timer.reset();
-        }
-    }
-
-    /// Heart beat request
-    /// 
-    pub fn heartbeat_requests(
-        &mut self,
-    ) -> Vec<(ServerId, AppendEntriesRequest<C>)> 
-    where 
-        C: Clone, 
-    {
-        if self.role != Role::Leader 
-        {
+        if !self.election_timer.expired() {
             return Vec::new();
         }
 
-        if !self.initial_heartbeat_pending 
-            && !self.heartbeat_timer.expired() 
-        {
-            return Vec::new();
-        }
-
-        let follower_ids= match self.leader.as_ref() {
-            Some(leader) => leader.replication.follower_ids(),
-            None => {
-                tracing::warn!(
-                    server_id = self.id.value(),
-                    "Leader state missing while building heartbeats"
-                );
-                
-                return Vec::new();
-            }
-        };
-
-        let mut requests = Vec::new();
-        
-        for follower_id in follower_ids {
-            if let Some(request) =
-                self.build_append_entries(follower_id) {
-                requests.push((
-                    follower_id,
-                    request,
-                ));
-            }
-        }
-
-        self.heartbeat_timer.reset();
-        self.initial_heartbeat_pending = false;
-
-        tracing::debug!(
+        tracing::info!(
             server_id = self.id.value(),
-            heartbeat_count = requests.len(),
-            "Built leader heartbeat requests"
+            term = self.current_term().value(),
+            role = ?self.role,
+            "Election timeout expired"
         );
 
-        requests
+        self.start_election();
+        self.election_timer.reset();
+
+        self.request_vote_actions(cluster_servers)
     } 
 
     pub fn from_storage(

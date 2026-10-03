@@ -2,31 +2,28 @@ use std::collections::HashMap;
 
 use rustyraft::raft::{
     RaftNode,
-    Role,
     ServerId,
 };
 
-use rustyraft::raft::state_machine::{
-    NoopStateMachine,
+use rustyraft::raft::action::RaftAction;
+
+use rustyraft::raft::rpc::{
+    RequestVoteRequest,
 };
+
+use rustyraft::raft::state_machine::NoopStateMachine;
 
 use rustyraft::raft::transport::{
     InMemoryTransport,
     RaftMessage,
     RaftMessagePayload,
+    Transport,
 };
 
 use super::node::{
     new_test_storage,
     TestStorage,
 };
-
-
-use rustyraft::raft::rpc::{
-    RequestVoteRequest,
-    RequestVoteResponse,
-};
-
 
 pub struct TestCluster {
     nodes: HashMap<
@@ -66,7 +63,6 @@ impl TestCluster {
     }
 }
 
-
 impl TestCluster {
     pub fn node(
         &self,
@@ -90,21 +86,26 @@ impl TestCluster {
 }
 
 impl TestCluster {
-
     pub fn start_election(
         &mut self,
         candidate_id: ServerId,
     ) {
-        // get all the server id from the clusters
+        // Get all the server ids from the cluster.
         let server_ids: Vec<ServerId> =
-            self.nodes.keys().copied().collect();
+            self.nodes
+                .keys()
+                .copied()
+                .collect();
 
-        // get the candidate with the provided id
+        // Get the candidate with the provided id.
         let candidate =
-            self.nodes.get_mut(&candidate_id)
-                .expect("candidate should exists");
-    
-        // candidate is starting the election
+            self.nodes
+                .get_mut(&candidate_id)
+                .expect(
+                    "candidate should exist",
+                );
+
+        // Candidate is starting the election.
         candidate.start_election();
 
         let term = candidate.current_term();
@@ -124,13 +125,14 @@ impl TestCluster {
                 last_log_term,
             );
 
-            let message = RaftMessage::new(
-                candidate_id,
-                server_id,
-                RaftMessagePayload::<String>::RequestVote(
-                    request,
-                ),
-            );
+            let message =
+                RaftMessage::new(
+                    candidate_id,
+                    server_id,
+                    RaftMessagePayload::RequestVote(
+                        request,
+                    ),
+                );
 
             self.transport.send(message);
         }
@@ -166,21 +168,21 @@ impl TestCluster {
         )
     }
 
-    /// From a given leader_id to a given follower_id
+    /// From a given leader_id to a given follower_id.
     pub fn send_append_entries(
         &mut self,
         leader_id: ServerId,
         follower_id: ServerId,
     ) -> bool {
-
-        // create the request which leader will provide you by building
-        // append entry requst for a given follower
+        // Create the request which leader will provide you
+        // by building an AppendEntries request for a given
+        // follower.
         let request = {
             let leader =
                 self.nodes
                     .get(&leader_id)
                     .expect(
-                        "leader should exist"
+                        "leader should exist",
                     );
 
             match leader.build_append_entries(
@@ -191,15 +193,18 @@ impl TestCluster {
             }
         };
 
-        // Sending the RaftMessage on the transport layer
-        self.transport.send(
+        // Sending the RaftMessage on the transport layer.
+        let message =
             RaftMessage::new(
                 leader_id,
                 follower_id,
-                RaftMessagePayload::<String>::AppendEntries(
+                RaftMessagePayload::AppendEntries(
                     request,
                 ),
-            ),
+            );
+
+        self.transport.send(
+            message,
         );
 
         true
@@ -245,6 +250,42 @@ impl TestCluster {
         );
     }
 
+    /// Drops one pending message destined for the given server.
+    ///
+    /// This is intentionally exposed by the test cluster so tests
+    /// can simulate message loss without knowing about the
+    /// underlying transport implementation.
+    pub fn drop_to(
+        &mut self,
+        server_id: ServerId,
+    ) -> bool {
+        self.transport.drop_to(
+            server_id,
+        )
+    }
+
+    /// Execute all protocol actions produced by a node.
+    ///
+    /// The Raft node only produces RaftAction values. The test
+    /// cluster acts as the runtime and converts those actions into
+    /// transport messages.
+    fn execute_actions(
+        &mut self,
+        from: ServerId,
+        actions: Vec<RaftAction<String>>,
+    ) {
+        for action in actions {
+            let message =
+                action.into_message(
+                    from,
+                );
+
+            self.transport.send(
+                message,
+            );
+        }
+    }
+
     fn deliver_message(
         &mut self,
         message: RaftMessage<String>,
@@ -258,34 +299,22 @@ impl TestCluster {
                 .copied()
                 .collect();
 
-        let mut response_message = None;
-
-        {
+        let actions: Vec<RaftAction<String>> = {
             let node =
                 self.nodes
                     .get_mut(&to)
                     .expect(
-                        "message destination should exist"
+                        "message destination should exist",
                     );
 
             match message.payload {
                 RaftMessagePayload::RequestVote(
                     request,
                 ) => {
-                    let response =
-                        node.handle_request_vote(
-                            request,
-                        );
-
-                    response_message = Some(
-                        RaftMessage::new(
-                            to,
-                            from,
-                            RaftMessagePayload::<String>::RequestVoteResponse(
-                                response,
-                            ),
-                        ),
-                    );
+                    node.handle_request_vote(
+                        from,
+                        request,
+                    )
                 }
 
                 RaftMessagePayload::RequestVoteResponse(
@@ -295,33 +324,16 @@ impl TestCluster {
                         from,
                         response,
                         &cluster_servers,
-                    );
+                    )
                 }
 
                 RaftMessagePayload::AppendEntries(
                     request,
                 ) => {
-                    let response =
-                        node.handle_append_entries(
-                            request,
-                        );
-
-                    tracing::debug!(
-                        from = from.value(),
-                        to = to.value(),
-                        success = response.success,
-                        "Delivered AppendEntries"
-                    );
-
-                    response_message = Some(
-                        RaftMessage::new(
-                            to,
-                            from,
-                            RaftMessagePayload::<String>::AppendEntriesResponse(
-                                response,
-                            ),
-                        ),
-                    );
+                    node.handle_append_entries(
+                        from,
+                        request,
+                    )
                 }
 
                 RaftMessagePayload::AppendEntriesResponse(
@@ -330,18 +342,15 @@ impl TestCluster {
                     node.handle_append_entries_response(
                         from,
                         response,
-                    );
+                    )
                 }
             }
-        }
+        };
 
-        if let Some(response) =
-            response_message
-        {
-            self.transport.send(
-                response,
-            );
-        }
+        self.execute_actions(
+            to,
+            actions,
+        );
 
         MessageDelivery {
             from,
@@ -349,12 +358,18 @@ impl TestCluster {
         }
     }
 
-    pub fn drop_to(
+    /// Delivers exactly one pending transport message.
+    pub fn deliver_next(
         &mut self,
-        server_id: ServerId,
-    ) -> bool {
-        self.transport.drop_to(
-            server_id,
+    ) -> Option<MessageDelivery> {
+        let message =
+            self.transport
+                .deliver_next()?;
+
+        Some(
+            self.deliver_message(
+                message,
+            )
         )
     }
 
@@ -363,86 +378,36 @@ impl TestCluster {
     /// A follower or candidate may start an election when its
     /// election timer expires. A leader may generate heartbeat or
     /// replication requests when its heartbeat timer expires.
-    pub fn tick(&mut self, server_id: ServerId) {
+    ///
+    /// The node produces protocol actions. The test cluster converts
+    /// those actions into transport messages, just like the runtime.
+    pub fn tick(
+        &mut self,
+        server_id: ServerId,
+    ) {
         let server_ids: Vec<ServerId> =
-            self.nodes.keys().copied().collect();
+            self.nodes
+                .keys()
+                .copied()
+                .collect();
 
-        let election_request = {
-            let node = self.nodes
-                .get_mut(&server_id)
-                .expect("node should exist");
+        let actions: Vec<RaftAction<String>> = {
+            let node =
+                self.nodes
+                    .get_mut(&server_id)
+                    .expect(
+                        "node should exist",
+                    );
 
-            let previous_term = node.current_term();
-
-            node.tick();
-
-            let started_election =
-                node.role() == Role::Candidate
-                && node.current_term() > previous_term;
-
-            if started_election {
-                Some(node.build_request_vote())
-            } else {
-                None
-            }
+            node.tick(
+                &server_ids,
+            )
         };
 
-        if let Some(request) = election_request {
-            for peer_id in server_ids {
-                if peer_id == server_id {
-                    continue;
-                }
-
-                let request = RequestVoteRequest::new(
-                    request.term,
-                    request.candidate_id,
-                    request.last_log_index,
-                    request.last_log_term,
-                );
-
-                self.transport.send(
-                    RaftMessage::new(
-                        server_id,
-                        peer_id,
-                        RaftMessagePayload::<String>::RequestVote(
-                            request,
-                        ),
-                    ),
-                );
-            }
-
-            return;
-        }
-
-        let requests = {
-            let node = self.nodes
-                .get_mut(&server_id)
-                .expect("node should exist");
-
-            if node.role() == Role::Leader {
-                node.heartbeat_requests()
-            } else {
-                Vec::new()
-            }
-        };
-
-        for (follower_id, request) in requests {
-            self.transport.send(
-                RaftMessage::new(
-                    server_id,
-                    follower_id,
-                    RaftMessagePayload::<String>::AppendEntries(
-                        request,
-                    ),
-                ),
-            );
-        }
-    }
-
-    /// Delivers exactly one pending transport message.
-    pub fn deliver_next(&mut self) -> Option<MessageDelivery> {
-        let message = self.transport.deliver_next()?;
-        Some(self.deliver_message(message))
+        self.execute_actions(
+            server_id,
+            actions,
+        );
     }
 
     /// Advances logical time once and delivers one message.
@@ -450,8 +415,10 @@ impl TestCluster {
         &mut self,
         server_id: ServerId,
     ) -> Option<MessageDelivery> {
-        self.tick(server_id);
+        self.tick(
+            server_id,
+        );
+
         self.deliver_next()
     }
-
 }
