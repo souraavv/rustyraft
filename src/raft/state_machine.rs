@@ -36,7 +36,7 @@ impl<C> StateMachine<C> for NoopStateMachine {
 
     fn apply(
         &mut self, 
-        command: &C
+        _: &C
     ) -> Result<(), Self::Error>
     {
         Ok(())

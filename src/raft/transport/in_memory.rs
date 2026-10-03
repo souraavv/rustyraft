@@ -10,7 +10,10 @@ use std::collections::VecDeque;
 
 use crate::raft::ServerId;
 
-use super::RaftMessage;
+use super::{
+    RaftMessage,
+    Transport,
+};
 
 #[derive(Debug)]
 pub struct InMemoryTransport<C> {
@@ -138,5 +141,25 @@ impl<C> InMemoryTransport<C> {
 impl<C> Default for InMemoryTransport<C> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Implement the transport interface for the InMemoryTransport 
+impl<C> Transport<C> for InMemoryTransport<C> {
+    fn send(
+        &mut self, 
+        message: RaftMessage<C>,
+    ) {
+        InMemoryTransport::send(
+            self, 
+            message
+        );
+    }
+
+    fn receive(
+        &mut self,
+    ) -> Option<RaftMessage<C>>
+    {
+        self.deliver_next()
     }
 }

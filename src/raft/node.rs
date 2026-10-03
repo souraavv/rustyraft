@@ -5,7 +5,7 @@
 //! by design we keep the network connections and timers outside the node
 //! and provide persistent storage through the storage abstraction.
 
-use crate::raft::{HeartbeatTimer, LogEntry, state_machine};
+use crate::raft::{HeartbeatTimer, LogEntry};
 use crate::raft::Role::{Follower};
 use crate::raft::commit::find_commit_index;
 use crate::raft::log::RaftLog;

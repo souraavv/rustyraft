@@ -16,9 +16,7 @@ use rustyraft::raft::rpc::{
 };
 
 use rustyraft::raft::transport::{
-    InMemoryTransport,
-    RaftMessage,
-    RaftMessagePayload,
+    InMemoryTransport, RaftMessage, RaftMessagePayload, Transport,
 };
 
 #[test]
@@ -601,5 +599,117 @@ fn transport_can_reorder_messages() {
     assert_eq!(
         transport.pending_count(),
         0,
+    );
+}
+
+/// Verifies the in-memory transport implements the transport contract.
+#[test]
+fn transport_trait_sends_message() {
+    let leader_id =
+        ServerId::new(1);
+
+    let follower_id =
+        ServerId::new(2);
+
+    let request =
+        AppendEntriesRequest::<String>::heartbeat(
+            Term::new(1),
+            leader_id,
+            LogIndex::ZERO,
+            Term::ZERO,
+            LogIndex::ZERO,
+        );
+
+    let message =
+        RaftMessage::new(
+            leader_id,
+            follower_id,
+            RaftMessagePayload::AppendEntries(
+                request,
+            ),
+        );
+
+    let mut transport =
+        InMemoryTransport::<String>::new();
+
+    Transport::send(
+        &mut transport,
+        message,
+    );
+
+    assert_eq!(
+        transport.pending_count(),
+        1,
+    );
+
+    let delivered =
+        transport
+            .deliver_next()
+            .expect(
+                "message should be queued",
+            );
+
+    assert_eq!(
+        delivered.from,
+        leader_id,
+    );
+
+    assert_eq!(
+        delivered.to,
+        follower_id,
+    );
+}
+
+/// Verifies the transport contract can receive a queued message.
+#[test]
+fn transport_trait_receives_message() {
+    let leader_id =
+        ServerId::new(1);
+
+    let follower_id =
+        ServerId::new(2);
+
+    let request =
+        AppendEntriesRequest::<String>::heartbeat(
+            Term::new(1),
+            leader_id,
+            LogIndex::ZERO,
+            Term::ZERO,
+            LogIndex::ZERO,
+        );
+
+    let message =
+        RaftMessage::new(
+            leader_id,
+            follower_id,
+            RaftMessagePayload::AppendEntries(
+                request,
+            ),
+        );
+
+    let mut transport =
+        InMemoryTransport::<String>::new();
+
+    Transport::send(
+        &mut transport,
+        message,
+    );
+
+    let received =
+        Transport::receive(
+            &mut transport,
+        )
+        .expect(
+            "message should be received",
+        );
+
+    assert_eq!(
+        received.from,
+        leader_id,
+    );
+
+    assert_eq!(
+        received.to,
+        follower_id,
     );
 }

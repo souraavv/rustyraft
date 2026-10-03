@@ -19,3 +19,15 @@ pub use message::{
     RaftMessage,
     RaftMessagePayload,
 };
+
+/// Sends messages b/w raft server
+pub trait Transport<C>  {
+    fn send(
+        &mut self, 
+        message: RaftMessage<C>,
+    );
+
+    fn receive(
+        &mut self,
+    ) -> Option<RaftMessage<C>>;
+}
