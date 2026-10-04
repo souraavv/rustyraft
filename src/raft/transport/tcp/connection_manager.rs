@@ -2,56 +2,32 @@
 //!
 //! This module owns the lifecycle and management policy for TCP
 //! connections between RustyRaft peers.
-//! 
-//! # Why is this separate from `TcpConnection`?
 //!
-//! There are two different responsibilities involved in networking:
+//! The manager is responsible for:
 //!
-//! 1. Managing connections.
-//! 2. Using an established connection.
-//!
-//! `TcpConnection` owns the mechanics of one established connection:
-//!
-//! - performing the handshake,
-//! - reading and writing frames,
-//! - encoding and decoding messages,
-//! - enforcing frame-size limits,
-//! - shutting down the connection.
-//!
-//! `TcpConnectionManager` owns the lifecycle and policy around those
-//! connections:
-//!
-//! - deciding whether a connection should exist,
+//! - maintaining peer configuration,
 //! - creating outbound connections,
 //! - registering inbound connections,
+//! - managing reader and writer tasks,
 //! - detecting failed connections,
 //! - scheduling reconnect attempts,
 //! - applying reconnect backoff,
-//! - removing dead connections.
-//! 
-//! This separation follows an important design principle:
+//! - routing outgoing messages to writer tasks.
 //!
-//! > Separate policy from mechanism.
-//!
-//! `TcpConnection` answers:
-//!
-//!     "How do I communicate over this TCP stream?"
-//!
-//! `TcpConnectionManager` answers:
-//!
-//!     "Which connection should exist and when should I maintain it?"
-
+//! It does not contain Raft protocol decisions.
 
 use std::collections::HashMap;
-use std::net::{SocketAddr, TcpStream};
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::raft::state::ServerId;
 use crate::raft::transport::message::RaftMessage;
 
 use super::connection::TcpConnection;
 use super::error::TcpTransportError;
-
 
 /// Initial reconnect delay.
 const INITIAL_RECONNECT_DELAY: Duration =
@@ -61,17 +37,29 @@ const INITIAL_RECONNECT_DELAY: Duration =
 const MAX_RECONNECT_DELAY: Duration =
     Duration::from_secs(30);
 
+/// Maximum number of messages waiting to be sent to one peer.
+const OUTGOING_CHANNEL_CAPACITY: usize = 256;
+
+/// Maximum number of incoming Raft messages waiting to be
+/// processed by the runtime.
+const INCOMING_CHANNEL_CAPACITY: usize = 256;
+
+/// Maximum number of connection failure events waiting for the
+/// connection manager to process.
+const CONNECTION_EVENT_CAPACITY: usize = 64;
+
+/// State used to schedule reconnect attempts for one peer.
 #[derive(Debug, Clone)]
 struct ReconnectState {
     /// Number of consecutive failed connection attempts.
-    attempts: u32, 
+    attempts: u32,
 
     /// Earliest time at which another connection attempt may occur.
     next_retry_at: Instant,
 }
 
 impl ReconnectState {
-
+    /// Creates reconnect state that allows an immediate attempt.
     fn new(now: Instant) -> Self {
         Self {
             attempts: 0,
@@ -79,6 +67,7 @@ impl ReconnectState {
         }
     }
 
+    /// Returns whether a reconnect attempt is currently allowed.
     fn ready(&self, now: Instant) -> bool {
         now >= self.next_retry_at
     }
@@ -90,17 +79,21 @@ impl ReconnectState {
     /// it reaches the maximum reconnect delay of 30 seconds.
     fn record_failure(&mut self, now: Instant) {
         // Count this failed connection attempt.
-        self.attempts = self.attempts.saturating_add(1);
+        self.attempts =
+            self.attempts.saturating_add(1);
 
         // Convert the attempt count into a zero-based exponent.
-        let attempt = self.attempts.saturating_sub(1);
+        let attempt =
+            self.attempts.saturating_sub(1);
 
-        // Calculate the exponential multiplier:
+        // Calculate the exponential multiplier.
         // The exponent is capped to avoid an unnecessarily large value.
-        let multiplier = 2u32.pow(attempt.min(10));
+        let multiplier =
+            2u32.pow(attempt.min(10));
 
         // Calculate the reconnect delay.
-        let mut delay = INITIAL_RECONNECT_DELAY * multiplier;
+        let mut delay =
+            INITIAL_RECONNECT_DELAY * multiplier;
 
         // Do not allow the reconnect delay to exceed the maximum.
         if delay > MAX_RECONNECT_DELAY {
@@ -111,6 +104,7 @@ impl ReconnectState {
         self.next_retry_at = now + delay;
     }
 
+    /// Resets the backoff after a successful connection.
     fn reset(&mut self, now: Instant) {
         self.attempts = 0;
         self.next_retry_at = now;
@@ -118,36 +112,107 @@ impl ReconnectState {
 }
 
 /// Configuration for a Raft peer.
-/// address to reach on the TCP and serverId is the unique Id
+///
+/// The address is used to reach the peer over TCP.
+/// `server_id` is the peer's unique Raft identity.
 #[derive(Debug, Clone, Copy)]
 pub struct PeerAddress {
     pub server_id: ServerId,
     pub address: SocketAddr,
 }
 
+/// Event sent by a reader or writer task when a connection fails.
+#[derive(Debug)]
+enum ConnectionEvent {
+    /// The connection to the given peer has failed.
+    Failed(ServerId),
+}
+
+/// State associated with one active peer connection.
+///
+/// The TCP stream itself is owned by the reader and writer tasks.
+/// The manager only keeps the channel used to send messages to the
+/// writer and the task handles used to manage their lifecycle.
+struct PeerConnection<C> {
+    /// Channel used to send outgoing messages to the writer task.
+    writer_tx: mpsc::Sender<RaftMessage<C>>,
+
+    /// Handle for the reader task.
+    reader_task: JoinHandle<()>,
+
+    /// Handle for the writer task.
+    writer_task: JoinHandle<()>,
+}
+
 /// Maintains TCP connections to Raft peers.
-pub struct TcpConnectionManager {
-     /// Identity of this Raft node.
-    local_server_id: ServerId, 
+///
+/// The manager does not directly perform blocking reads or writes.
+/// Each established TCP connection is split into a reader task and
+/// a writer task.
+pub struct TcpConnectionManager<C> {
+    /// Identity of this Raft node.
+    local_server_id: ServerId,
 
     /// Known peer addresses.
     peers: HashMap<ServerId, SocketAddr>,
 
     /// Currently active TCP connections.
-    connections: HashMap<ServerId, TcpConnection>,
+    connections:
+        HashMap<ServerId, PeerConnection<C>>,
 
-     /// Reconnect state for peers whose connections are unavailable.
-    reconnect_state: HashMap<ServerId, ReconnectState>,
+    /// Reconnect state for peers whose connections are unavailable.
+    reconnect_state:
+        HashMap<ServerId, ReconnectState>,
+
+    /// Sends decoded Raft messages from reader tasks to the
+    /// transport.
+    incoming_tx:
+        mpsc::Sender<RaftMessage<C>>,
+
+    /// Receives connection failure events from reader and writer
+    /// tasks.
+    connection_event_rx:
+        mpsc::Receiver<ConnectionEvent>,
+
+    /// Sender used by reader and writer tasks to report failures.
+    connection_event_tx:
+        mpsc::Sender<ConnectionEvent>,
 }
 
-impl TcpConnectionManager {
-
+impl<C> TcpConnectionManager<C>
+where
+    C: serde::Serialize
+        + serde::de::DeserializeOwned
+        + Send
+        + 'static,
+{
+    /// Creates a connection manager.
+    ///
+    /// The returned receiver is the central incoming-message queue
+    /// used by `TcpTransport`.
+    ///
+    /// Reader tasks push decoded Raft messages into this queue.
+    /// 
+    /// Send trait is required  - it is safe to transfer ownership
+    /// of this value to another thread - required because tokio
+    /// may execute spawn task on a separate worker thread
+    /// 
+    /// 'static  - means that this type does not contains
+    /// references that are requried valie from short lifetime
+    /// We need both serialize and desrialize bcz we want to 
+    /// encode outgoing message and decode incoming message
     pub fn new(
-        local_server_id: ServerId, 
+        local_server_id: ServerId,
         peers: Vec<PeerAddress>,
-    ) -> Self {
-        let mut peer_addresses = HashMap::new();
-        let mut reconnect_state = HashMap::new();
+    ) -> (
+        Self,
+        mpsc::Receiver<RaftMessage<C>>,
+    ) {
+        let mut peer_addresses =
+            HashMap::new();
+
+        let mut reconnect_state =
+            HashMap::new();
 
         let now = Instant::now();
 
@@ -157,38 +222,111 @@ impl TcpConnectionManager {
             }
 
             peer_addresses.insert(
-                peer.server_id, 
+                peer.server_id,
                 peer.address,
             );
+
             reconnect_state.insert(
-                peer.server_id, 
+                peer.server_id,
                 ReconnectState::new(now),
             );
-
         }
 
-        Self {
-            local_server_id, 
+        // Create bounded channels, The mpsc gives us back
+        // transmitter (tx) and reciver (rx)
+        let (
+            incoming_tx,
+            incoming_rx,
+        ) = mpsc::channel(
+            INCOMING_CHANNEL_CAPACITY,
+        );
+
+        let (
+            connection_event_tx,
+            connection_event_rx,
+        ) = mpsc::channel(
+            CONNECTION_EVENT_CAPACITY,
+        );
+
+        let manager = Self {
+            local_server_id,
             peers: peer_addresses,
             connections: HashMap::new(),
             reconnect_state,
-        }
+            incoming_tx,
+            connection_event_rx,
+            connection_event_tx,
+        };
+
+        (
+            manager,
+            incoming_rx,
+        )
+    }
+
+    /// Returns the local Raft server identity.
+    pub fn local_server_id(&self) -> ServerId {
+        self.local_server_id
+    }
+
+    /// Returns whether a connection to the given peer exists.
+    pub fn contains(
+        &self,
+        peer_id: ServerId,
+    ) -> bool {
+        self.connections
+            .contains_key(&peer_id)
+    }
+
+    /// Returns the number of currently active connections.
+    pub fn len(&self) -> usize {
+        self.connections.len()
+    }
+
+    /// Returns whether this node owns the outbound connection to
+    /// the given peer.
+    ///
+    /// The lower `ServerId` initiates the TCP connection.
+    pub fn owns_outbound_connection(
+        &self,
+        peer_id: ServerId,
+    ) -> bool {
+        self.local_server_id < peer_id
     }
 
     /// Maintains outbound connections.
+    /// 
+    /// This is about the health of the peer connections
+    /// 
+    /// The connection reader/writer tasks run indepedently 
+    /// in the background; when one of them finishes or fails, 
+    /// they send an event such as ConnectionClosed or
+    /// ConnectionFailed into the connection_event_rx 
+    /// 
+    /// This method periodicially comes alongs and first drain
+    /// those events in the proces connection events 
+    /// - so that manager can remove dead connections 
+    /// - mark the peers as disconnected
+    /// 
+    /// So in short - 
+    ///  Background connection task detect failures -> send events
+    ///  -> maintain_connection() picks up those events and 
+    ///     update the state and reconnect logic runs
     ///
     /// This method performs any reconnect attempts whose backoff
     /// timers have expired.
     ///
     /// It deliberately does not sleep. The caller controls how often
     /// this method is invoked.
-    pub fn maintain_connections(
-        &mut self, 
+    pub async fn maintain_connections(
+        &mut self,
         now: Instant,
     ) {
+        self.process_connection_events();
+
         let peers: Vec<ServerId> =
             self.peers.keys().copied().collect();
-        
+
         for peer_id in peers {
             if !self.owns_outbound_connection(peer_id) {
                 continue;
@@ -208,30 +346,63 @@ impl TcpConnectionManager {
                 continue;
             }
 
-            self.try_connect(peer_id, now);
+            self.try_connect(
+                peer_id,
+                now,
+            )
+            .await;
         }
     }
 
-    fn try_connect(
-        &mut self, 
+    /// Processes connection failure events reported by reader and
+    /// writer tasks.
+    ///
+    /// The tasks themselves do not modify the connection manager.
+    /// They only report that their connection has failed.
+    fn process_connection_events(&mut self) {
+        // try_recv : try to recieve a value from the rx (reciver)
+        // without waiting
+        while let Ok(event) =
+            self.connection_event_rx.try_recv()
+        {
+            match event {
+                ConnectionEvent::Failed(peer_id) => {
+                    self.connection_failed(
+                        peer_id,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Attempts to establish one outbound connection.
+    ///
+    /// A failed attempt updates reconnect backoff but does not
+    /// propagate the connection failure into the Raft protocol.
+    async fn try_connect(
+        &mut self,
         peer_id: ServerId,
         now: Instant,
     ) {
-        let address = match self.peers.get(&peer_id) {
-            Some(address) => *address,
-            None => return,
-        };
+        let address =
+            match self.peers.get(&peer_id) {
+                Some(address) => *address,
+                None => return,
+            };
 
-        let result = self.connect(
-            peer_id, 
-            address,
-        );
+        let result = self
+            .connect(
+                peer_id,
+                address,
+            )
+            .await;
 
         if result.is_ok() {
-            // we are successfully able to connect thus resetting 
-            // reconnect state back to attemps = 0
-            if let Some(state) 
-                = self.reconnect_state.get_mut(&peer_id) 
+            // The connection succeeded, so reset the reconnect
+            // state back to zero attempts.
+            if let Some(state) =
+                self.reconnect_state
+                    .get_mut(&peer_id)
             {
                 state.reset(now);
             }
@@ -239,28 +410,45 @@ impl TcpConnectionManager {
             return;
         }
 
-        // If still failed to connect then record the failure and attempts
+        // The connection attempt failed, so record the failure.
         if let Some(state) =
-            self.reconnect_state.get_mut(&peer_id) 
+            self.reconnect_state
+                .get_mut(&peer_id)
         {
             state.record_failure(now);
         }
     }
 
-    pub fn connect(
-        &mut self, 
+    /// Creates an outbound connection to a peer immediately.
+    ///
+    /// This method is used by the maintenance logic. It may also be
+    /// useful during initial startup when the caller wants to
+    /// establish connections eagerly.
+    pub async fn connect(
+        &mut self,
         peer_id: ServerId,
         address: SocketAddr,
     ) -> Result<(), TcpTransportError> {
-        
         if peer_id == self.local_server_id {
             return Err(
                 TcpTransportError::UnknownPeer(
-                    "cannot connect to the local server".to_string()
+                    "cannot connect to the local server"
+                        .to_string(),
                 ),
             );
         }
-        
+
+        if !self.peers.contains_key(&peer_id) {
+            return Err(
+                TcpTransportError::UnknownPeer(
+                    format!(
+                        "peer {:?} is not configured",
+                        peer_id,
+                    ),
+                ),
+            );
+        }
+
         if !self.owns_outbound_connection(peer_id) {
             return Err(
                 TcpTransportError::UnknownPeer(
@@ -278,26 +466,41 @@ impl TcpConnectionManager {
             return Ok(());
         }
 
-        let stream = 
-            TcpStream::connect(address)?;
+        let stream =
+            tokio::net::TcpStream::connect(
+                address,
+            )
+            .await?;
 
-        let connection = 
+        let connection =
             TcpConnection::establish(
-                stream, 
-                self.local_server_id, 
+                stream,
+                self.local_server_id,
                 peer_id,
-            )?;
-        
-        self.register_connection(connection)?;
+            )
+            .await?;
+
+        self.register_connection(
+            connection,
+        )
+        .await?;
 
         Ok(())
     }
 
-    pub fn register_connection(
-        &mut self, 
+    /// Registers an already-established connection.
+    ///
+    /// This is primarily used by the listener after accepting an
+    /// inbound TCP connection and completing the handshake.
+    ///
+    /// The peer identity comes from the handshake. The manager
+    /// verifies that the peer is part of the configured cluster
+    /// before registering the connection.
+    pub async fn register_connection(
+        &mut self,
         connection: TcpConnection,
     ) -> Result<(), TcpTransportError> {
-        let peer_id = 
+        let peer_id =
             connection.peer_server_id();
 
         if peer_id == self.local_server_id {
@@ -309,69 +512,201 @@ impl TcpConnectionManager {
             );
         }
 
-        if let Some(mut old_connection) =
-            self.connections.insert(
-                peer_id, 
-                connection,
-            )
-        {
-            let _ = old_connection.shutdown();
+        if !self.peers.contains_key(&peer_id) {
+            return Err(
+                TcpTransportError::UnknownPeer(
+                    format!(
+                        "peer {:?} is not configured",
+                        peer_id,
+                    ),
+                ),
+            );
         }
 
-        if let Some(state) = 
-            self.reconnect_state.get_mut(&peer_id)
+        // Replace an existing connection to the same peer.
+        //
+        // This can happen when a new inbound connection arrives
+        // while an older connection is still registered.
+        if self.connections.contains_key(&peer_id) {
+            self.remove(peer_id);
+        }
+
+        let (
+            _local_server_id,
+            peer_id,
+            read_half,
+            write_half,
+        ) = connection.split();
+
+        let (
+            writer_tx,
+            writer_rx,
+        ) = mpsc::channel(
+            OUTGOING_CHANNEL_CAPACITY,
+        );
+
+        let incoming_tx =
+            self.incoming_tx.clone();
+
+        let connection_event_tx =
+            self.connection_event_tx.clone();
+
+        let reader_task =
+            tokio::spawn(async move {
+                Self::run_reader(
+                    peer_id,
+                    read_half,
+                    incoming_tx,
+                    connection_event_tx,
+                )
+                .await;
+            });
+
+        let connection_event_tx =
+            self.connection_event_tx.clone();
+
+        let writer_task =
+            tokio::spawn(async move {
+                Self::run_writer(
+                    peer_id,
+                    write_half,
+                    writer_rx,
+                    connection_event_tx,
+                )
+                .await;
+            });
+
+        let peer_connection =
+            PeerConnection {
+                writer_tx,
+                reader_task,
+                writer_task,
+            };
+
+        self.connections.insert(
+            peer_id,
+            peer_connection,
+        );
+
+        if let Some(state) =
+            self.reconnect_state
+                .get_mut(&peer_id)
         {
             state.reset(Instant::now());
         }
-            
+
         Ok(())
     }
 
-    pub fn send<C>(
-        &mut self, 
-        message: &RaftMessage<C>,
-    ) -> Result<(), TcpTransportError>
-    where 
-        C: serde::Serialize,
-    {
-        let peer_id = message.to; 
-
-        let connection = 
-            self.connections
-                .get_mut(&peer_id)
-                .ok_or_else(|| {
-                    TcpTransportError::ConnectionFailed(
-                        format!(
-                            "no connection to peer {:?}",
-                            peer_id,
-                        ),
-                    )
-                })?;
-
-        match connection.send(message) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                self.connection_failed(
-                    peer_id,
-                );
-
-                Err(error)
-            }
-        }
-    }
-
-
-    pub fn receive<C> (
-        &mut self, 
+    /// Runs the reader task for one peer.
+    ///
+    /// The reader task owns the read half of the TCP connection and
+    /// continuously waits for incoming Raft messages.
+    ///
+    /// Successfully decoded messages are sent to the central
+    /// incoming channel.
+    async fn run_reader(
         peer_id: ServerId,
-    ) -> Result<RaftMessage<C>, TcpTransportError> 
-    where   
-        C: serde::de::DeserializeOwned,
-    {
+        mut read_half:
+            tokio::net::tcp::OwnedReadHalf,
+        incoming_tx:
+            mpsc::Sender<RaftMessage<C>>,
+        connection_event_tx:
+            mpsc::Sender<ConnectionEvent>,
+    ) {
+        loop {
+            let result =
+                TcpConnection::read_frame(
+                    &mut read_half,
+                )
+                .await;
 
-        let connection = 
+            match result {
+                Ok(message) => {
+                    if incoming_tx
+                        .send(message)
+                        .await
+                        .is_err()
+                    {
+                        // The transport is no longer receiving
+                        // messages, so there is no reason to keep
+                        // the reader task alive.
+                        break;
+                    }
+                }
+
+                Err(_) => {
+                    let _ =
+                        connection_event_tx
+                            .send(
+                                ConnectionEvent::Failed(
+                                    peer_id,
+                                ),
+                            )
+                            .await;
+
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Runs the writer task for one peer.
+    ///
+    /// The writer task owns the write half of the TCP connection and
+    /// waits for messages from the peer-specific outgoing channel.
+    async fn run_writer(
+        peer_id: ServerId,
+        mut write_half:
+            tokio::net::tcp::OwnedWriteHalf,
+        mut writer_rx:
+            mpsc::Receiver<RaftMessage<C>>,
+        connection_event_tx:
+            mpsc::Sender<ConnectionEvent>,
+    ) {
+        while let Some(message) =
+            writer_rx.recv().await
+        {
+            if TcpConnection::write_frame(
+                &mut write_half,
+                message,
+            )
+            .await
+            .is_err()
+            {
+                let _ =
+                    connection_event_tx
+                        .send(
+                            ConnectionEvent::Failed(
+                                peer_id,
+                            ),
+                        )
+                        .await;
+
+                break;
+            }
+        }
+    }
+
+
+    /// Sends a Raft message through the writer task associated with
+    /// the destination peer.
+    ///
+    /// This method does not perform a network write itself.
+    /// Instead, it places the message into the peer's bounded
+    /// outgoing channel.
+    ///
+    /// The writer task owns the actual TCP write half.
+    pub async fn send(
+        &mut self,
+        message: RaftMessage<C>,
+    ) -> Result<(), TcpTransportError> {
+        let peer_id =
+            message.to;
+
+        let connection =
             self.connections
-                .get_mut(&peer_id)
+                .get(&peer_id)
                 .ok_or_else(|| {
                     TcpTransportError::ConnectionFailed(
                         format!(
@@ -381,94 +716,85 @@ impl TcpConnectionManager {
                     )
                 })?;
 
-        match connection.receive() {
-            Ok(message) => Ok(message),
-
-            Err(error) => {
-                self.connection_failed(
-                    peer_id,
-                );
-
-                Err(error)
-            }
-        }
-
+        connection
+            .writer_tx
+            .send(message)
+            .await
+            .map_err(|_| {
+                TcpTransportError::ConnectionClosed
+            })
     }
 
+    /// Marks a connection as failed.
+    ///
+    /// The connection is removed immediately and the reconnect
+    /// state is updated. The actual reconnect attempt happens when
+    /// `maintain_connections()` observes that the backoff has
+    /// expired.
     fn connection_failed(
-        &mut self, 
+        &mut self,
         peer_id: ServerId,
     ) {
-        if let Some(mut connection) 
-            = self.connections.remove(&peer_id) {
-            let _ = connection.shutdown();
+        if let Some(connection) =
+            self.connections.remove(&peer_id)
+        {
+            connection.reader_task.abort();
+            connection.writer_task.abort();
         }
 
-        let now = Instant::now();
+        let now =
+            Instant::now();
 
-        if let Some(state) = 
-            self.reconnect_state.get_mut(&peer_id) {
+        if let Some(state) =
+            self.reconnect_state
+                .get_mut(&peer_id)
+        {
             state.record_failure(now);
         }
-
     }
 
+    /// Removes a peer connection without scheduling a reconnect.
+    ///
+    /// This is useful when the caller intentionally removes a peer
+    /// or is shutting down the node.
     pub fn remove(
-        &mut self, 
+        &mut self,
         peer_id: ServerId,
-    ) -> Option<TcpConnection> {
-        self.connections.remove(&peer_id)
-    }
-
-    pub fn shutdown(
-        &mut self, 
-        peer_id: ServerId,
-    ) -> Result<(), TcpTransportError> {
-        match self.connections.remove(&peer_id) {
-            Some(mut connection) => {
-                connection.shutdown()?;
-                Ok(())
-            }
-
-            None => Ok(())
+    ) {
+        if let Some(connection) =
+            self.connections.remove(&peer_id)
+        {
+            connection.reader_task.abort();
+            connection.writer_task.abort();
         }
     }
-    
-    pub fn get_mut(
-        &mut self, 
-        peer_id: ServerId,
-    ) -> Option<&mut TcpConnection> {
-        self.connections.get_mut(&peer_id)
-    }
 
-    /// Returns the local Raft server identity.
-    pub fn local_server_id(&self) -> ServerId {
-        self.local_server_id
-    }
-
-    /// Returns whether a connection to the given peer exists.
-    pub fn contains(
-        &self,
-        peer_id: ServerId,
-    ) -> bool {
-        self.connections.contains_key(&peer_id)
-    }
-
-    /// Returns the number of currently active connections.
-    pub fn len(&self) -> usize {
-        self.connections.len()
-    }
-
-    /// Returns whether this node owns the outbound connection to
-    /// the given peer.
+    /// Shuts down and removes a peer connection.
     ///
-    /// The lower `ServerId` initiates the TCP connection.
-    pub fn owns_outbound_connection(
+    /// The reader and writer tasks are stopped. The TCP stream is
+    /// closed when the owned halves are dropped by those tasks.
+    pub fn shutdown(
+        &mut self,
+        peer_id: ServerId,
+    ) {
+        self.remove(peer_id);
+    }
+
+    /// Returns a reference to the outgoing channel for a peer.
+    ///
+    /// The manager normally sends through `send()`. This method is
+    /// kept for cases where the transport needs direct access to the
+    /// peer's writer channel.
+    pub fn writer(
         &self,
         peer_id: ServerId,
-    ) -> bool {
-        self.local_server_id < peer_id
+    ) -> Option<
+        &mpsc::Sender<RaftMessage<C>>
+    > {
+        self.connections
+            .get(&peer_id)
+            .map(|connection|
+                &connection.writer_tx
+            )
     }
-    
 }
-

@@ -8,3 +8,16 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 serde = { version = "1", features = ["derive"] }
 bincode = { version = "2", features = ["serde"] }
+
+tokio = {
+    version = "1",
+    features = [
+        "net",
+        "io-util",
+        "sync",
+        "rt",
+        "rt-multi-thread",
+        "macros",
+        "time",
+    ],
+}
