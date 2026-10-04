@@ -26,6 +26,7 @@ pub struct TestCluster {
         ServerId,
         RaftNode<String, TestStorage>,
     >,
+    server_ids: Vec<ServerId>,
     transport: InMemoryTransport<String>,
 }
 
@@ -54,6 +55,7 @@ impl TestCluster {
 
         Self {
             nodes,
+            server_ids: server_ids.to_vec(),
             transport: InMemoryTransport::new(),
         }
     }
@@ -87,11 +89,7 @@ impl TestCluster {
         candidate_id: ServerId,
     ) {
         // Get all the server ids from the cluster.
-        let server_ids: Vec<ServerId> =
-            self.nodes
-                .keys()
-                .copied()
-                .collect();
+        let server_ids = self.server_ids.clone();
 
         // Get the candidate with the provided id.
         let candidate =
@@ -271,11 +269,7 @@ impl TestCluster {
         let from = message.from;
         let to = message.to;
 
-        let cluster_servers: Vec<ServerId> =
-            self.nodes
-                .keys()
-                .copied()
-                .collect();
+        let cluster_servers = self.server_ids.clone();
 
         let actions: Vec<RaftAction<String>> = {
             let node =
@@ -388,11 +382,7 @@ impl TestCluster {
         &mut self,
         server_id: ServerId,
     ) {
-        let server_ids: Vec<ServerId> =
-            self.nodes
-                .keys()
-                .copied()
-                .collect();
+        let server_ids = self.server_ids.clone();
 
         let actions: Vec<RaftAction<String>> = {
             let node =
@@ -480,5 +470,11 @@ impl TestCluster {
             first,
             second,
         );
+    }
+
+    pub fn server_ids(
+        &self,
+    ) -> &[ServerId] {
+        &self.server_ids
     }
 }

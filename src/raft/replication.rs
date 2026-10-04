@@ -38,16 +38,11 @@ pub struct FollowerProgress {
 impl FollowerProgress {
 
     /// Create replication state for a follower
-
     pub fn new(next_index: LogIndex) -> Self {
-
         Self {
-
             next_index,
             match_index: LogIndex::ZERO,
-
         }
-
     }
 
     /// Record that the follower successfully replicated through
@@ -69,30 +64,19 @@ impl FollowerProgress {
         &mut self,
         replicated_index: LogIndex,
     ) {
-
         // handle the network dealyed packets i.e., ingore if the replicated
         // index < match_index
-
         if replicated_index > self.match_index {
-
             self.match_index = replicated_index;
-
         }
-
-        // temporary
 
         let new_next_index =
             replicated_index.next();
-
         // Safely from delayed old packets - tolerant to those
-
         if new_next_index > self.next_index {
-
             self.next_index =
                 new_next_index;
-
         }
-
     }
 
     /// Move the next index backwards after a replication failure
@@ -103,16 +87,12 @@ impl FollowerProgress {
     /// A new invariant - the next index should be always >= match_index
 
     pub fn record_failure(&mut self) {
-
         if self.next_index > self.match_index {
-
             self.next_index =
                 LogIndex::new(
                     self.next_index.value() - 1
                 );
-
         }
-
     }
 
 }
@@ -120,12 +100,9 @@ impl FollowerProgress {
 /// Leader side replication state
 ///
 /// Leader holds the follower progress
-
 #[derive(Debug)]
 pub struct ReplicationState {
-
     progress: Vec<(ServerId, FollowerProgress)>,
-
 }
 
 impl ReplicationState {
@@ -134,33 +111,24 @@ impl ReplicationState {
         followers: &[ServerId],
         leader_last_index: LogIndex,
     ) -> Self {
-
         let next_index =
             leader_last_index.next();
-
         let progress = followers
             .iter()
             .copied()
             .map(|server_id| {
-
                 (
                     server_id,
-
                     FollowerProgress::new(
                         next_index,
                     ),
-
                 )
-
             })
             .collect();
 
         Self {
-
             progress
-
         }
-
     }
 
     /// Returns replication progress for a follower.
@@ -317,21 +285,14 @@ impl ReplicationState {
             .progress
             .iter_mut()
             .find(|(id, _)| *id == server_id) {
-
                 Some((_, progress)) => {
-
                     progress.record_success(
                         replicated_index,
                     );
-
                     true
-
                 }
-
                 None => false,
-
             }
-
     }
 
     /// Records a failed AppendEntries response.
@@ -345,19 +306,12 @@ impl ReplicationState {
             .progress
             .iter_mut()
             .find(|(id, _)| *id == server_id) {
-
                 Some((_, progress)) => {
-
                     progress.record_failure();
-
                     true
-
                 }
-
                 None => false,
-
             }
-
     }
 
     // --- helpers (getters) ----

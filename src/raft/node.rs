@@ -506,7 +506,7 @@ where
                 cluster_size = cluster_servers.len(),
                 "Recorded RequestVote response"
             );
-            
+
             election.has_majority(cluster_servers.len())
         };
 
@@ -923,42 +923,31 @@ where
         );
     }
 
-
     /// Create the leader state after winning the election
     /// 
     /// Every other server start with next_index immediately the leaders
     /// last log entry. match_index start at ZERO 
     fn become_leader(
-        &mut self, 
+        &mut self,
         cluster_servers: &[ServerId],
     ) {
-        // Get all your followers by iterating through the slice of Server Ids
-        let followers: Vec<ServerId> = cluster_servers
-            .iter()
-            .copied()
-            .filter(|server_id| *server_id != self.id)
-            .collect();
-
-        // Each node has its persistent store, now that will help to 
-        // feed someinfo to the leader's state i.e., last_log_index
-        // 
-        let last_log_index = self.last_log_index();
-
         self.role = Role::Leader;
 
-        // The new leader must immediately establish
-        // its authority with an AppendEntries heartbeat.
+        self.election = None;
+
+        // A newly elected leader must immediately send
+        // AppendEntries to every other server.
         self.initial_heartbeat_pending = true;
 
-        // leader assume each follower has log until its last log index
-        // later when it will discover differently it will share the append
-        // entries accordingly
-        self.leader = Some(LeaderState::new(
-            &followers,
-            last_log_index
-        ));
+        let followers: Vec<ServerId> =
+            cluster_servers
+                .iter()
+                .copied()
+                .filter(|server_id| *server_id != self.id)
+                .collect();
 
-        self.election = None;
+        let last_log_index =
+            self.last_log_index();
 
         tracing::info!(
             server_id = self.id.value(),
@@ -968,6 +957,24 @@ where
             "Raft node became leader"
         );
 
+        for follower_id in &followers {
+            tracing::debug!(
+                server_id = self.id.value(),
+                follower_id = follower_id.value(),
+                next_index = last_log_index.next().value(),
+                "Initializing replication state for follower"
+            );
+        }
+
+        self.leader = Some(
+            LeaderState {
+                replication:
+                    crate::raft::replication::ReplicationState::new(
+                        &followers,
+                        last_log_index,
+                    ),
+            }
+        );
     }
 
 
