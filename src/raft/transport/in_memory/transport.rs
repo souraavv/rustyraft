@@ -14,12 +14,7 @@ use std::collections::{
     VecDeque,
 };
 
-use crate::raft::{ServerId, transport::message};
-
-use super::{
-    RaftMessage,
-    Transport,
-};
+use crate::raft::{ServerId, transport::{RaftMessage, Transport}};
 
 #[derive(Debug)]
 pub struct InMemoryTransport<C> {
@@ -242,6 +237,29 @@ impl<C> InMemoryTransport<C> {
             to = to.value(),
             "Healed transport link"
         );
+    }
+
+    pub fn duplicate_matching<F>(
+        &mut self,
+        predicate: F,
+    ) -> bool
+    where
+        F: Fn(&RaftMessage<C>) -> bool,
+        C: Clone,
+    {
+        let message = self
+            .messages
+            .iter()
+            .find(|message| predicate(message))
+            .cloned();
+
+        match message {
+            Some(message) => {
+                self.messages.push_back(message);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Partition communication in both directions between

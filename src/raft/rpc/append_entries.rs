@@ -1,10 +1,12 @@
+use serde::{Deserialize, Serialize};
+
 use crate::raft::log::LogEntry;
 use crate::raft::state::{LogIndex, ServerId, Term};
 
 /// Request sent by a leader to replicate log entries to a follower
 ///
 /// An empty entries vector represents the heartbeat
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendEntriesRequest<C> {
     pub term: Term,
     pub leader_id: ServerId,
@@ -15,7 +17,7 @@ pub struct AppendEntriesRequest<C> {
 }
 
 /// Response to append entry RPC
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendEntriesResponse {
     pub term: Term,
     pub success: bool,

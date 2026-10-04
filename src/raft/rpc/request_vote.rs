@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::raft::state::{LogIndex, ServerId, Term};
 
 /// Request send by a 'candidate' to request vote from other servers
@@ -9,7 +11,7 @@ use crate::raft::state::{LogIndex, ServerId, Term};
 ///  - it identity
 ///
 /// This will help the reciver determine whether they can cast a vote or not
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestVoteRequest {
     pub term: Term,
     pub candidate_id: ServerId,
@@ -18,7 +20,7 @@ pub struct RequestVoteRequest {
 }
 
 /// Response to the Request Vote RPC
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestVoteResponse {
     pub term: Term,
     pub vote_granted: bool,

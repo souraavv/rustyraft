@@ -4,20 +4,25 @@
 //! The payload contains the Raft RPC itself.
 //! 
 
+use serde::{Deserialize, Serialize};
+
 use crate::raft::rpc::{
-    AppendEntriesRequest, AppendEntriesResponse, RequestVoteRequest, RequestVoteResponse,
+    AppendEntriesRequest, 
+    AppendEntriesResponse, 
+    RequestVoteRequest, 
+    RequestVoteResponse,
 };
 
 use crate::raft::state::ServerId;
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RaftMessage<C> {
     pub from: ServerId,
     pub to: ServerId, 
     pub payload: RaftMessagePayload<C>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RaftMessagePayload<C> {
     // request RPC messages
     RequestVote(RequestVoteRequest),

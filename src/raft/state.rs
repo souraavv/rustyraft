@@ -1,7 +1,10 @@
+use serde::{Deserialize, Serialize};
+
 use crate::raft::replication::ReplicationState;
 
 /// Raft Term number
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, 
+    Default, Serialize, Deserialize)]
 pub struct Term(u64);
 
 impl Term {
@@ -21,7 +24,18 @@ impl Term {
 }
 
 /// Unique identity of the server
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Hash)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    Serialize,
+    Deserialize,
+    PartialOrd,
+    Ord,
+)]
 pub struct ServerId(u64);
 
 impl ServerId {
@@ -35,7 +49,7 @@ impl ServerId {
 }
 
 /// Index of an entry in the RAFT log
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
 pub struct LogIndex(u64);
 
 impl LogIndex {

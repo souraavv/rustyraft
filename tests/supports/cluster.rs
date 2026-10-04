@@ -415,6 +415,23 @@ impl TestCluster {
         self.deliver_next()
     }
 
+    /// Duplicates the first pending message that matches
+    /// the supplied predicate.
+    ///
+    /// The original message remains in the transport queue,
+    /// and a duplicate is added as another pending message.
+    pub fn duplicate_matching<F>(
+        &mut self,
+        predicate: F,
+    ) -> bool
+    where
+        F: Fn(&RaftMessage<String>) -> bool,
+    {
+        self.transport.duplicate_matching(predicate)
+    }
+
+    
+
     /// Partitions communication from one server to another.
     ///
     /// This is directional. Messages from `first` to `second`

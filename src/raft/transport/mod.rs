@@ -12,15 +12,16 @@
 
 pub mod in_memory;
 pub mod message;
+pub mod tcp;
 
 pub use in_memory::InMemoryTransport;
-
-pub use message::{
-    RaftMessage,
-    RaftMessagePayload,
-};
+pub use message::{RaftMessage, RaftMessagePayload};
+pub use tcp::TcpTransport;
 
 /// Sends messages b/w raft server
+/// This is what Raft runtime all worry about
+/// Raft Runtime need not to bother if it is TCP based or in memory
+/// All it cares it send and recieve
 pub trait Transport<C>  {
     fn send(
         &mut self, 

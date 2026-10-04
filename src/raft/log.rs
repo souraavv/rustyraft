@@ -11,10 +11,12 @@
 //! in the storage layer
 //!  
 
+use serde::{Deserialize, Serialize};
+
 use crate::raft::state::{LogIndex, Term};
 
 /// Each entry has the term in which it was added + Generic Command
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct LogEntry<C> {
     pub term: Term,
     pub command: C,
