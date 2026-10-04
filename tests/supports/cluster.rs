@@ -7,10 +7,6 @@ use rustyraft::raft::{
 
 use rustyraft::raft::action::RaftAction;
 
-use rustyraft::raft::rpc::{
-    RequestVoteRequest,
-};
-
 use rustyraft::raft::state_machine::NoopStateMachine;
 
 use rustyraft::raft::transport::{
@@ -108,34 +104,16 @@ impl TestCluster {
         // Candidate is starting the election.
         candidate.start_election();
 
-        let term = candidate.current_term();
-        let candidate_id = candidate.id();
-        let last_log_index = candidate.last_log_index();
-        let last_log_term = candidate.last_log_term();
-
-        for server_id in server_ids {
-            if server_id == candidate_id {
-                continue;
-            }
-
-            let request = RequestVoteRequest::new(
-                term,
-                candidate_id,
-                last_log_index,
-                last_log_term,
+        // Build the RequestVote actions from the candidate.
+        let actions =
+            candidate.request_vote_actions(
+                &server_ids,
             );
 
-            let message =
-                RaftMessage::new(
-                    candidate_id,
-                    server_id,
-                    RaftMessagePayload::RequestVote(
-                        request,
-                    ),
-                );
-
-            self.transport.send(message);
-        }
+        self.execute_actions(
+            candidate_id,
+            actions,
+        );
     }
 
     pub fn deliver_to(
@@ -193,18 +171,18 @@ impl TestCluster {
             }
         };
 
-        // Sending the RaftMessage on the transport layer.
-        let message =
-            RaftMessage::new(
-                leader_id,
-                follower_id,
-                RaftMessagePayload::AppendEntries(
-                    request,
-                ),
-            );
+        // Create the same RaftAction that the RaftNode
+        // would produce for AppendEntries.
+        let action =
+            RaftAction::SendAppendEntries {
+                target: follower_id,
+                request,
+            };
 
-        self.transport.send(
-            message,
+        // Execute the action through the test transport.
+        self.execute_actions(
+            leader_id,
+            vec![action],
         );
 
         true
@@ -373,6 +351,31 @@ impl TestCluster {
         )
     }
 
+    /// Deliver the first pending message that matches
+    /// the supplied predicate.
+    ///
+    /// Unrelated messages remain in the transport queue.
+    pub fn deliver_matching<F>(
+        &mut self,
+        predicate: F,
+    ) -> Option<MessageDelivery>
+    where
+        F: Fn(&RaftMessage<String>) -> bool,
+    {
+        let message =
+            self.transport.deliver_matching(predicate)?;
+
+        let from = message.from;
+        let to = message.to;
+
+        self.deliver_message(message);
+
+        Some(MessageDelivery {
+            from,
+            to,
+        })
+    }
+
     /// Advances logical time for one node.
     ///
     /// A follower or candidate may start an election when its
@@ -420,5 +423,62 @@ impl TestCluster {
         );
 
         self.deliver_next()
+    }
+
+    /// Partitions communication from one server to another.
+    ///
+    /// This is directional. Messages from `first` to `second`
+    /// are blocked, while messages from `second` to `first`
+    /// remain unaffected.
+    pub fn partition(
+        &mut self,
+        first: ServerId,
+        second: ServerId,
+    ) {
+        self.transport.partition(
+            first,
+            second,
+        );
+    }
+
+    /// Heals communication from one server to another.
+    ///
+    /// This is directional. Messages from `first` to `second`
+    /// are allowed again.
+    pub fn heal(
+        &mut self,
+        first: ServerId,
+        second: ServerId,
+    ) {
+        self.transport.heal(
+            first,
+            second,
+        );
+    }
+
+    /// Partitions communication in both directions between
+    /// two servers.
+    pub fn partition_bidirectional(
+        &mut self,
+        first: ServerId,
+        second: ServerId,
+    ) {
+        self.transport.partition_bidirectional(
+            first,
+            second,
+        );
+    }
+
+    /// Heals communication in both directions between
+    /// two servers.
+    pub fn heal_bidirectional(
+        &mut self,
+        first: ServerId,
+        second: ServerId,
+    ) {
+        self.transport.heal_bidirectional(
+            first,
+            second,
+        );
     }
 }

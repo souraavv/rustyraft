@@ -790,3 +790,115 @@ fn transport_trait_receives_message() {
         follower_id,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server(id: u64) -> ServerId {
+        ServerId::new(id)
+    }
+
+    #[test]
+    fn partition_blocks_direction() {
+        let mut transport =
+            InMemoryTransport::<String>::new();
+
+        transport.partition(
+            server(1),
+            server(2),
+        );
+
+        assert!(
+            transport.is_partitioned(
+                server(1),
+                server(2),
+            )
+        );
+
+        assert!(
+            !transport.is_partitioned(
+                server(2),
+                server(1),
+            )
+        );
+    }
+
+    #[test]
+    fn heal_restores_direction() {
+        let mut transport =
+            InMemoryTransport::<String>::new();
+
+        transport.partition(
+            server(1),
+            server(2),
+        );
+
+        transport.heal(
+            server(1),
+            server(2),
+        );
+
+        assert!(
+            !transport.is_partitioned(
+                server(1),
+                server(2),
+            )
+        );
+    }
+
+    #[test]
+    fn partition_bidirectional_blocks_both_directions() {
+        let mut transport =
+            InMemoryTransport::<String>::new();
+
+        transport.partition_bidirectional(
+            server(1),
+            server(2),
+        );
+
+        assert!(
+            transport.is_partitioned(
+                server(1),
+                server(2),
+            )
+        );
+
+        assert!(
+            transport.is_partitioned(
+                server(2),
+                server(1),
+            )
+        );
+    }
+
+    #[test]
+    fn heal_bidirectional_restores_both_directions() {
+        let mut transport =
+            InMemoryTransport::<String>::new();
+
+        transport.partition_bidirectional(
+            server(1),
+            server(2),
+        );
+
+        transport.heal_bidirectional(
+            server(1),
+            server(2),
+        );
+
+        assert!(
+            !transport.is_partitioned(
+                server(1),
+                server(2),
+            )
+        );
+
+        assert!(
+            !transport.is_partitioned(
+                server(2),
+                server(1),
+            )
+        );
+    }
+}

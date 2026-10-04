@@ -180,7 +180,7 @@ where
     // ------------------------------
     // --------- Actions ------------
     // ------------------------------
-    fn request_vote_actions(
+    pub fn request_vote_actions(
         &self,
         cluster_servers: &[ServerId],
     ) -> Vec<RaftAction<C>> {
@@ -499,6 +499,14 @@ where
             };
 
             election.record_vote(voter_id);
+
+            tracing::debug!(
+                server_id = self.id.value(),
+                voter_id = voter_id.value(),
+                cluster_size = cluster_servers.len(),
+                "Recorded RequestVote response"
+            );
+            
             election.has_majority(cluster_servers.len())
         };
 
