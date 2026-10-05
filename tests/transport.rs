@@ -680,8 +680,8 @@ fn transport_can_reorder_messages() {
 }
 
 /// Verifies the in-memory transport implements the transport contract.
-#[test]
-fn transport_trait_sends_message() {
+#[tokio::test]
+async fn transport_trait_sends_message() {
     let leader_id =
         ServerId::new(1);
 
@@ -712,6 +712,10 @@ fn transport_trait_sends_message() {
     Transport::send(
         &mut transport,
         message,
+    )
+    .await
+    .expect(
+        "message should be sent",
     );
 
     assert_eq!(
@@ -736,10 +740,10 @@ fn transport_trait_sends_message() {
         follower_id,
     );
 }
-
 /// Verifies the transport contract can receive a queued message.
-#[test]
-fn transport_trait_receives_message() {
+
+#[tokio::test]
+async fn transport_trait_receives_message() {
     let leader_id =
         ServerId::new(1);
 
@@ -770,12 +774,17 @@ fn transport_trait_receives_message() {
     Transport::send(
         &mut transport,
         message,
+    )
+    .await
+    .expect(
+        "message should be sent",
     );
 
     let received =
         Transport::receive(
             &mut transport,
         )
+        .await
         .expect(
             "message should be received",
         );

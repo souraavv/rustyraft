@@ -14,7 +14,7 @@ use std::collections::{
     VecDeque,
 };
 
-use crate::raft::{ServerId, transport::{RaftMessage, Transport}};
+use crate::raft::{ServerId, transport::{RaftMessage, Transport, tcp::TcpTransportError}};
 
 #[derive(Debug)]
 pub struct InMemoryTransport<C> {
@@ -341,17 +341,21 @@ impl<C> Default for InMemoryTransport<C> {
 
 /// Implement the transport interface for the InMemoryTransport
 impl<C> Transport<C> for InMemoryTransport<C> {
-    fn send(
+    
+    async fn send(
         &mut self,
         message: RaftMessage<C>,
-    ) {
+    ) -> Result<(), TcpTransportError>
+    {
         InMemoryTransport::send(
             self,
             message,
         );
+
+        Ok(())
     }
 
-    fn receive(
+    async fn receive(
         &mut self,
     ) -> Option<RaftMessage<C>> {
         self.deliver_next()

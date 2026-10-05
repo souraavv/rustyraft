@@ -60,27 +60,31 @@ where
     ///
     /// The node owns the Raft protocol decision.
     /// The runtime is responsible only for executing the actions.
-    pub fn tick(
+    pub async fn tick(
         &mut self,
     )
     where
         C: Clone,
     {
         let actions =
-            self.node.tick(&self.cluster_servers);
+            self.node.tick(
+                &self.cluster_servers,
+            );
 
-        self.execute_actions(actions);
+        self.execute_actions(actions)
+            .await;
     }
 
     /// Executes actions produced by the Raft node.
     ///
     /// The runtime deliberately does not decide why an action is required.
     /// It only translates the action into a transport message and sends it.
-    fn execute_actions(
+    async fn execute_actions(
         &mut self,
         actions: Vec<RaftAction<C>>,
     ) {
-        let from = self.node.id();
+        let from =
+            self.node.id();
 
         for action in actions {
             let message =
@@ -92,14 +96,25 @@ where
                 "Executing Raft action"
             );
 
-            self.transport.send(message);
+            if let Err(error) =
+                self.transport
+                    .send(message)
+                    .await
+            {
+                tracing::warn!(
+                    ?error,
+                    "Failed to send Raft message"
+                );
+            }
         }
     }
 
-    pub fn receive(
+    pub async fn receive(
         &mut self,
     ) -> Option<RaftMessage<C>> {
-        self.transport.receive()
+        self.transport
+            .receive()
+            .await
     }
 
     /// Handles an incoming Raft message.
@@ -107,63 +122,80 @@ where
     /// The runtime is responsible for dispatching the message to the
     /// appropriate RaftNode handler. Any actions produced by the node
     /// are executed through the transport.
-    pub fn handle_message(
+    pub async fn handle_message(
         &mut self,
         message: RaftMessage<C>,
     )
     where
         C: Clone,
     {
-        let from = message.from;
+        let from =
+            message.from;
 
         match message.payload {
             RaftMessagePayload::RequestVote(
                 request,
             ) => {
                 let actions =
-                    self.node.handle_request_vote(
-                        from,
-                        request,
-                    );
+                    self.node
+                        .handle_request_vote(
+                            from,
+                            request,
+                        );
 
-                self.execute_actions(actions);
+                self.execute_actions(
+                    actions,
+                )
+                .await;
             }
 
             RaftMessagePayload::RequestVoteResponse(
                 response,
             ) => {
                 let actions =
-                    self.node.handle_request_vote_response(
-                        from,
-                        response,
-                        &self.cluster_servers,
-                    );
+                    self.node
+                        .handle_request_vote_response(
+                            from,
+                            response,
+                            &self.cluster_servers,
+                        );
 
-                self.execute_actions(actions);
+                self.execute_actions(
+                    actions,
+                )
+                .await;
             }
 
             RaftMessagePayload::AppendEntries(
                 request,
             ) => {
                 let actions =
-                    self.node.handle_append_entries(
-                        from,
-                        request,
-                    );
+                    self.node
+                        .handle_append_entries(
+                            from,
+                            request,
+                        );
 
-                self.execute_actions(actions);
+                self.execute_actions(
+                    actions,
+                )
+                .await;
             }
 
             RaftMessagePayload::AppendEntriesResponse(
                 response,
             ) => {
                 let actions =
-                    self.node.handle_append_entries_response(
-                        from,
-                        response,
-                    );
+                    self.node
+                        .handle_append_entries_response(
+                            from,
+                            response,
+                        );
 
-                self.execute_actions(actions);
+                self.execute_actions(
+                    actions,
+                )
+                .await;
             }
         }
     }
