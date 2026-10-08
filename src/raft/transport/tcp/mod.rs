@@ -11,5 +11,6 @@ mod listener;
 mod protocol;
 mod transport;
 
-pub use transport::TcpTransport;
+pub use connection_manager::PeerAddress;
 pub use error::TcpTransportError;
+pub use transport::TcpTransport;

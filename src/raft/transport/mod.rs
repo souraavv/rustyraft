@@ -16,9 +16,11 @@ pub mod tcp;
 
 pub use in_memory::InMemoryTransport;
 pub use message::{RaftMessage, RaftMessagePayload};
-pub use tcp::TcpTransport;
-
-use crate::raft::transport::tcp::TcpTransportError;
+pub use tcp::{
+    PeerAddress,
+    TcpTransport,
+    TcpTransportError,
+};
 
 /// Sends messages b/w raft server
 ///
@@ -37,6 +39,7 @@ use crate::raft::transport::tcp::TcpTransportError;
 #[allow(async_fn_in_trait)]
 pub trait Transport<C>  {
     type Error;
+    
     /// Sends one Raft message
     async fn send(
         &mut self, 
