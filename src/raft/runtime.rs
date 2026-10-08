@@ -30,6 +30,7 @@ where
     S: StateMachine<C>,
     St::Error: Debug,
     T: Transport<C>,
+    T::Error: Debug,
 {
     node: RaftNode<C, St, S>,
     transport: T,
@@ -42,6 +43,7 @@ where
     S: StateMachine<C>,
     St::Error: Debug,
     T: Transport<C>,
+    T::Error: Debug,
 {
     pub fn new(
         node: RaftNode<C, St, S>,

@@ -342,6 +342,8 @@ impl<C> Default for InMemoryTransport<C> {
 /// Implement the transport interface for the InMemoryTransport
 impl<C> Transport<C> for InMemoryTransport<C> {
     
+    type Error = std::convert::Infallible;
+    
     async fn send(
         &mut self,
         message: RaftMessage<C>,

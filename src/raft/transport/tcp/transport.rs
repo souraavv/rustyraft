@@ -189,6 +189,8 @@ where
         + 'static,
 {
 
+    type Error = TcpTransportError;
+
     async fn send(
         &mut self, 
         message: RaftMessage<C>,

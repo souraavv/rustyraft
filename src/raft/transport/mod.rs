@@ -36,6 +36,7 @@ use crate::raft::transport::tcp::TcpTransportError;
 /// The in-memory transport can complete these operations immediately.
 #[allow(async_fn_in_trait)]
 pub trait Transport<C>  {
+    type Error;
     /// Sends one Raft message
     async fn send(
         &mut self, 
