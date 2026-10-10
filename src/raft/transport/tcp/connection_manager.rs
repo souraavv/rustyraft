@@ -135,7 +135,7 @@ enum ConnectionEvent {
 /// writer and the task handles used to manage their lifecycle.
 struct PeerConnection<C> {
     /// Channel used to send outgoing messages to the writer task.
-    writer_tx: mpsc::Sender<RaftMessage<C>>,
+    outgoing_message_sender: mpsc::Sender<RaftMessage<C>>,
 
     /// Handle for the reader task.
     reader_task: JoinHandle<()>,
@@ -166,16 +166,16 @@ pub struct TcpConnectionManager<C> {
 
     /// Sends decoded Raft messages from reader tasks to the
     /// transport.
-    incoming_tx:
+    incoming_message_sender:
         mpsc::Sender<RaftMessage<C>>,
 
     /// Receives connection failure events from reader and writer
     /// tasks.
-    connection_event_rx:
+    connection_event_receiver:
         mpsc::Receiver<ConnectionEvent>,
 
     /// Sender used by reader and writer tasks to report failures.
-    connection_event_tx:
+    connection_event_sender:
         mpsc::Sender<ConnectionEvent>,
 }
 
@@ -235,15 +235,15 @@ where
         // Create bounded channels, The mpsc gives us back
         // transmitter (tx) and reciver (rx)
         let (
-            incoming_tx,
+            incoming_message_sender,
             incoming_rx,
         ) = mpsc::channel(
             INCOMING_CHANNEL_CAPACITY,
         );
 
         let (
-            connection_event_tx,
-            connection_event_rx,
+            connection_event_sender,
+            connection_event_receiver,
         ) = mpsc::channel(
             CONNECTION_EVENT_CAPACITY,
         );
@@ -253,9 +253,9 @@ where
             peers: peer_addresses,
             connections: HashMap::new(),
             reconnect_state,
-            incoming_tx,
-            connection_event_rx,
-            connection_event_tx,
+            incoming_message_sender,
+            connection_event_receiver,
+            connection_event_sender,
         };
 
         (
@@ -301,7 +301,7 @@ where
     /// The connection reader/writer tasks run indepedently 
     /// in the background; when one of them finishes or fails, 
     /// they send an event such as ConnectionClosed or
-    /// ConnectionFailed into the connection_event_rx 
+    /// ConnectionFailed into the connection_event_receiver 
     /// 
     /// This method periodicially comes alongs and first drain
     /// those events in the proces connection events 
@@ -363,7 +363,7 @@ where
         // try_recv : try to recieve a value from the rx (reciver)
         // without waiting
         while let Ok(event) =
-            self.connection_event_rx.try_recv()
+            self.connection_event_receiver.try_recv()
         {
             match event {
                 ConnectionEvent::Failed(peer_id) => {
@@ -472,6 +472,8 @@ where
             )
             .await?;
 
+        // connection manager pass the ownership of the stream down to the
+        // connection.rs (TcpConnection) - thus we have mut TcpSTream
         let connection =
             TcpConnection::establish(
                 stream,
@@ -480,6 +482,7 @@ where
             )
             .await?;
 
+        // 
         self.register_connection(
             connection,
         )
@@ -503,6 +506,7 @@ where
         let peer_id =
             connection.peer_server_id();
 
+        // I can't make a connection to myself, reject all just registrations
         if peer_id == self.local_server_id {
             return Err(
                 TcpTransportError::UnknownPeer(
@@ -512,6 +516,8 @@ where
             );
         }
 
+        // This peer of connection must be a known peer to me, if i don't
+        // know then reject the connection
         if !self.peers.contains_key(&peer_id) {
             return Err(
                 TcpTransportError::UnknownPeer(
@@ -531,6 +537,8 @@ where
             self.remove(peer_id);
         }
 
+        // Get the access to the reader and writer stream - so that we can
+        // work indepedently on these two halfs
         let (
             _local_server_id,
             peer_id,
@@ -538,47 +546,74 @@ where
             write_half,
         ) = connection.split();
 
+        // Create a async channel (bounded) with two ends
+        // outgoing_message_sender (sender) and outgoing_message_receiver (receiver)
+        // The reason we have channel is bcz we want writing and sending
+        // task to be taken by two different entity
+        // outgoing_message_sender enqueue the outgoing RaftMessages
+        // whlie outgoing_message_receiver take that message -> serialize this -> send to the
+        // tcpConnection. This decoupled both the manager and the writer
+        // if queue is full, an async send using .send().await wait until
+        // space become available, providing backpressure instead of unlimited
+        // backlog
         let (
-            writer_tx,
-            writer_rx,
+            outgoing_message_sender,
+            outgoing_message_receiver,
         ) = mpsc::channel(
             OUTGOING_CHANNEL_CAPACITY,
         );
 
-        let incoming_tx =
-            self.incoming_tx.clone();
+        // We are creating more clones of senders
+        // These are the sender which sends messages into the incoming 
+        // message queue 
+        let incoming_message_sender =
+            self.incoming_message_sender.clone();
 
-        let connection_event_tx =
-            self.connection_event_tx.clone();
+        // We are creating a clone of the connection event sender as well
+        // we will pass the incoming message sender and connection event
+        // sender to the asyn task which is reader task.
 
+        let connection_event_sender =
+            self.connection_event_sender.clone();
+
+        // We are giving handle to the reader half of the tcp stream to this 
+        // reader task, this is the stream that connection.rs replied to us
+        // and we have created extra handles for the incoming messages and
+        // connection event sender ... remember these are sender to the messgage
+        // queue
         let reader_task =
             tokio::spawn(async move {
                 Self::run_reader(
                     peer_id,
                     read_half,
-                    incoming_tx,
-                    connection_event_tx,
+                    incoming_message_sender,
+                    connection_event_sender,
                 )
                 .await;
             });
 
-        let connection_event_tx =
-            self.connection_event_tx.clone();
-
+        // Again one more clone of sender (mpsc) connection event 
+        // we will pass this handle to the writer 
+        let connection_event_sender =
+            self.connection_event_sender.clone();
+        
+        // writer task - consumes the write half of the tcp stream
         let writer_task =
+            // note that we are sending ownership of receiver and sender here
             tokio::spawn(async move {
                 Self::run_writer(
                     peer_id,
                     write_half,
-                    writer_rx,
-                    connection_event_tx,
+                    outgoing_message_receiver,
+                    connection_event_sender,
                 )
                 .await;
             });
 
+        // keep handle to the peer connection
         let peer_connection =
             PeerConnection {
-                writer_tx,
+                outgoing_message_sender,
                 reader_task,
                 writer_task,
             };
@@ -609,11 +644,12 @@ where
         peer_id: ServerId,
         mut read_half:
             tokio::net::tcp::OwnedReadHalf,
-        incoming_tx:
+        incoming_message_sender:
             mpsc::Sender<RaftMessage<C>>,
-        connection_event_tx:
+        connection_event_sender:
             mpsc::Sender<ConnectionEvent>,
     ) {
+        // starts an infinite loop
         loop {
             let result =
                 TcpConnection::read_frame(
@@ -623,7 +659,12 @@ where
 
             match result {
                 Ok(message) => {
-                    if incoming_tx
+                    // try to send the message to the incoming message
+                    // queue and wait until it is sent. if sending fails
+                    // then we will stop the reader loop
+                    // .await is required because we have a queue .. a bounded
+                    // queue 
+                    if incoming_message_sender
                         .send(message)
                         .await
                         .is_err()
@@ -631,13 +672,14 @@ where
                         // The transport is no longer receiving
                         // messages, so there is no reason to keep
                         // the reader task alive.
+                        // 
                         break;
                     }
                 }
 
                 Err(_) => {
                     let _ =
-                        connection_event_tx
+                        connection_event_sender
                             .send(
                                 ConnectionEvent::Failed(
                                     peer_id,
@@ -659,13 +701,13 @@ where
         peer_id: ServerId,
         mut write_half:
             tokio::net::tcp::OwnedWriteHalf,
-        mut writer_rx:
+        mut outgoing_message_receiver:
             mpsc::Receiver<RaftMessage<C>>,
-        connection_event_tx:
+        connection_event_sender:
             mpsc::Sender<ConnectionEvent>,
     ) {
         while let Some(message) =
-            writer_rx.recv().await
+            outgoing_message_receiver.recv().await
         {
             if TcpConnection::write_frame(
                 &mut write_half,
@@ -675,7 +717,7 @@ where
             .is_err()
             {
                 let _ =
-                    connection_event_tx
+                    connection_event_sender
                         .send(
                             ConnectionEvent::Failed(
                                 peer_id,
@@ -717,7 +759,7 @@ where
                 })?;
 
         connection
-            .writer_tx
+            .outgoing_message_sender
             .send(message)
             .await
             .map_err(|_| {
@@ -794,7 +836,7 @@ where
         self.connections
             .get(&peer_id)
             .map(|connection|
-                &connection.writer_tx
+                &connection.outgoing_message_sender
             )
     }
 }

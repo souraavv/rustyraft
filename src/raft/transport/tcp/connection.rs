@@ -105,6 +105,10 @@ impl TcpConnection {
     pub async fn shutdown(
         &mut self,
     ) -> Result<(), TcpTransportError> {
+        // close this connection entierly, wait until the shutdown process
+        // is completely finished, and if something goes wrong during the 
+        // shutdown, stop this function immediately and pass the error back
+        // to the caller (?)
         self.stream.shutdown().await?;
 
         Ok(())
@@ -235,6 +239,11 @@ impl TcpConnection {
         OwnedReadHalf,
         OwnedWriteHalf,
     ) {
+        // split the stream into the read and write half
+        // This method is consumed by the manager, so that it can run
+        // a reader task and writer task concurrenty on the same TCP connection
+        // reader wil continuously receives the messages, while writer sends
+        // outgoing messages
         let (
             read_half,
             write_half,

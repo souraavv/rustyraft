@@ -18,11 +18,14 @@ pub fn encode<T>(
 where
     T: Serialize,
 {
+    // bincode::config::standard() defines the default layout rules
+    // - Little endian, integer encoding (variant - small number small byte)
     bincode::serde::encode_to_vec(
         value,
         bincode::config::standard(),
     )
     .map_err(|error: bincode::error::EncodeError| {
+        // This is a serialization error
         TcpTransportError::Serialization(
             error.to_string(),
         )
@@ -45,6 +48,7 @@ where
             bincode::config::standard(),
         )
         .map_err(|error: bincode::error::DecodeError| {
+            // deserialization error
             TcpTransportError::Deserialization(
                 error.to_string(),
             )
