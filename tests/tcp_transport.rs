@@ -412,3 +412,149 @@ async fn three_node_tcp_transport_delivers_messages()
         }
     }
 }
+
+#[tokio::test(
+    flavor = "multi_thread",
+    worker_threads = 4
+)]
+async fn tcp_transport_delivers_multiple_messages_over_one_connection()
+{
+    let node1 = ServerId::new(1);
+    let node2 = ServerId::new(2);
+
+    let address1 = reserve_address().await;
+    let address2 = reserve_address().await;
+
+    let mut transport1 =
+        TcpTransport::<String>::bind(
+            node1,
+            address1,
+            vec![
+                PeerAddress {
+                    server_id: node2,
+                    address: address2,
+                },
+            ],
+        )
+        .await
+        .expect("failed to bind node1 transport");
+
+    let transport2 =
+        TcpTransport::<String>::bind(
+            node2,
+            address2,
+            vec![
+                PeerAddress {
+                    server_id: node1,
+                    address: address1,
+                },
+            ],
+        )
+        .await
+        .expect("failed to bind node2 transport");
+
+    // Node 2 continuously receives messages using its transport.
+    let (received_tx, mut received_rx) =
+        tokio::sync::mpsc::channel(3);
+
+    let node2_task = tokio::spawn(async move {
+        let mut transport = transport2;
+
+        while let Some(message) =
+            transport.receive_message().await
+        {
+            if received_tx.send(message).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Establish the connection owned by node 1.
+    timeout(
+        Duration::from_secs(3),
+        async {
+            loop {
+                transport1.maintain_connections().await;
+
+                if transport1.connection_manager().len() == 1 {
+                    break;
+                }
+
+                sleep(Duration::from_millis(10)).await;
+            }
+        },
+    )
+    .await
+    .expect("timed out waiting for TCP connection");
+
+    // Send three messages with distinct terms so that their
+    // order and contents can be verified.
+    for term_value in 1..=3 {
+        let term = Term::new(term_value);
+
+        let message =
+            RaftMessage::new(
+                node1,
+                node2,
+                RaftMessagePayload::AppendEntries(
+                    AppendEntriesRequest {
+                        term,
+                        leader_id: node1,
+                        prev_log_index: LogIndex::ZERO,
+                        prev_log_term: Term::ZERO,
+                        entries: vec![],
+                        leader_commit: LogIndex::ZERO,
+                    },
+                ),
+            );
+
+        transport1
+            .send_message(message)
+            .await
+            .expect("failed to send Raft message");
+    }
+
+    // Receive and verify all three messages in order.
+    for expected_term in 1..=3 {
+        let message =
+            timeout(
+                Duration::from_secs(3),
+                received_rx.recv(),
+            )
+            .await
+            .expect("timed out waiting for message")
+            .expect("node2 receive channel closed");
+
+        assert_eq!(message.from, node1);
+        assert_eq!(message.to, node2);
+
+        match message.payload {
+            RaftMessagePayload::AppendEntries(request) => {
+                assert_eq!(
+                    request.term,
+                    Term::new(expected_term),
+                    "messages must arrive in send order",
+                );
+
+                assert_eq!(request.leader_id, node1);
+                assert!(request.entries.is_empty());
+            }
+
+            payload => {
+                panic!(
+                    "unexpected payload received: {:?}",
+                    payload,
+                );
+            }
+        }
+    }
+
+    // The connection should remain registered after all messages.
+    assert_eq!(
+        transport1.connection_manager().len(),
+        1,
+        "expected the persistent connection to remain active",
+    );
+
+    node2_task.abort();
+}

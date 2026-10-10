@@ -54,6 +54,27 @@ where
             .await
     }
 
+    /// Receives the next Raft message from the transport.
+    ///
+    /// While waiting for a message, this method also handles incoming
+    /// TCP connections and periodically maintains outbound peer
+    /// connections.
+    ///
+    /// It uses tokio::select! to concurrently wait for three
+    /// asynchronous operations:
+    ///
+    /// - Receiving a Raft message from the incoming message channel.
+    /// - Accepting an incoming TCP connection and registering it with
+    ///   the connection manager.
+    /// - Ticking the connection maintenance interval to process
+    ///   connection failures and attempt reconnections.
+    ///
+    /// When a Raft message arrives, the method returns it immediately.
+    /// When a connection is accepted or the maintenance timer ticks,
+    /// the corresponding operation is handled and the method continues
+    /// waiting for the next Raft message.
+    ///
+    /// Returns `None` if the incoming message channel is closed.
     pub async fn receive_message(
         &mut self, 
     ) -> Option<RaftMessage<C>> {
