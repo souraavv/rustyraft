@@ -217,8 +217,7 @@ impl TcpConnection {
 
         Ok(Self {
             local_server_id,
-            peer_server_id:
-                peer_handshake.server_id,
+            peer_server_id: peer_handshake.server_id,
             stream,
         })
     }

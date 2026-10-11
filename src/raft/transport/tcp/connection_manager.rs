@@ -583,6 +583,7 @@ where
         // queue
         let reader_task =
             tokio::spawn(async move {
+                // future do nothing unless we poll or await
                 Self::run_reader(
                     peer_id,
                     read_half,
