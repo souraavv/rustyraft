@@ -1,29 +1,19 @@
 //! TCP listener for incoming Raft peer connections.
-//!
-//! The listener is responsible only for accepting incoming TCP
-//! connections.
-//!
-//! It does not:
-//! - read Raft messages,
-//! - process Raft protocol messages,
-//! - make Raft decisions,
-//! - manage reconnects.
-//!
-//! Once a TCP connection is accepted, the connection performs the
-//! handshake and is then registered with `TcpConnectionManager`.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
-use tokio::net::{
-    TcpListener,
-    TcpStream,
-};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use crate::raft::state::ServerId;
 
 use super::connection::TcpConnection;
-use super::connection_manager::TcpConnectionManager;
 use super::error::TcpTransportError;
+
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct TcpListenerService {
     /// Identity of the local Raft server.
@@ -39,8 +29,7 @@ impl TcpListenerService {
         local_server_id: ServerId,
         address: SocketAddr,
     ) -> Result<Self, TcpTransportError> {
-        let listener =
-            TcpListener::bind(address).await?;
+        let listener = TcpListener::bind(address).await?;
 
         Ok(Self {
             local_server_id,
@@ -48,77 +37,79 @@ impl TcpListenerService {
         })
     }
 
-    /// Returns the address on which this listener is bound.
     pub fn local_addr(
         &self,
     ) -> Result<SocketAddr, TcpTransportError> {
         Ok(self.listener.local_addr()?)
     }
 
-    /// Accepts one incoming TCP connection without performing
-    /// the handshake.
+    /// Accepts TCP connections independently of the transport.
     ///
-    /// This method separates accepting the socket from establishing
-    /// the Raft connection. The transport driver can select on this
-    /// method without risking cancellation of an in-progress handshake.
-    ///
-    /// After accepting the socket, the caller is responsible for
-    /// completing the handshake and registering the connection.
-    pub async fn accept_stream(
-        &self,
-    ) -> Result<
-        (TcpStream, SocketAddr),
-        TcpTransportError,
-    > {
-        Ok(self.listener.accept().await?)
-    }
+    /// Each connection completes its handshake in a separate task.
+    /// Established connections are published through a bounded channel.
+    /// The connection manager remains responsible for registration.
+    pub fn spawn(
+        self,
+        established_sender: mpsc::Sender<TcpConnection>,
+    ) -> JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
 
-    /// Accepts one incoming TCP connection and registers it with
-    /// the connection manager.
-    ///
-    /// The peer must complete the TCP handshake successfully before
-    /// the connection is registered.
-    ///
-    /// Note: this method performs the handshake inline. If it is used
-    /// inside a tokio::select! branch, that branch can be cancelled
-    /// while the handshake is in progress. For the background transport
-    /// driver, prefer accept_stream() and complete the handshake in
-    /// a separate task.
-    pub async fn accept<C>(
-        &self,
-        connection_manager: &mut TcpConnectionManager<C>,
-    ) -> Result<(), TcpTransportError>
-    where
-        C: serde::Serialize
-            + serde::de::DeserializeOwned
-            + Send
-            + 'static,
-    {
-        // Accept the socket from the remote peer.
-        let (stream, _address) =
-            self.accept_stream().await?;
+                // Step 1. Ask listener to accept the incoming
+                // client connection
+                let (stream, address) =
+                    match self.listener.accept().await {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            tracing::warn!(
+                                ?error,
+                                "Failed to accept TCP connection"
+                            );
+                            continue;
+                        }
+                    };
 
-        // Complete the handshake before registering the connection.
-        let connection =
-            TcpConnection::accept(
-                stream,
-                self.local_server_id,
-            )
-            .await?;
+                let local_server_id = self.local_server_id;
+                let sender = established_sender.clone();
 
-        // The manager owns the lifecycle of established connections,
-        // including the reader and writer tasks.
-        connection_manager
-            .register_connection(connection)
-            .await?;
+                // Step2. Create the TcpConnection based on the stream
+                tokio::spawn(async move {
+                    // Attempt the handshake in a give timeout
+                    // if done else boom
+                    let result = timeout(
+                        HANDSHAKE_TIMEOUT,
+                        TcpConnection::accept(
+                            stream,
+                            local_server_id,
+                        ),
+                    )
+                    .await;
 
-        Ok(())
-    }
-
-    /// Returns the identity of the local Raft server.
-    pub fn local_server_id(
-        &self,
-    ) -> ServerId {
-        self.local_server_id
+                    match result {
+                        Ok(Ok(connection)) => {
+                            if sender.send(connection).await.is_err() {
+                                tracing::debug!(
+                                    %address,
+                                    "Transport closed before connection registration"
+                                );
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            tracing::warn!(
+                                %address,
+                                ?error,
+                                "TCP handshake failed"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                %address,
+                                "TCP handshake timed out"
+                            );
+                        }
+                    }
+                });
+            }
+        })
     }
 }

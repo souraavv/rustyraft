@@ -1,173 +1,175 @@
 //! TCP transport implementation.
-//!
-//! `TcpTransport` is the transport-facing facade for the real
-//! network transport.
-//!
-//! It owns:
-//! - the TCP listener,
-//! - the connection manager,
-//! - the incoming Raft message queue.
-//!
-//! It does not contain Raft protocol decisions.
 
 use std::net::SocketAddr;
 use std::time::Instant;
 
-use tokio::time::{
-    self, 
-    Duration,
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::time::{self, Duration};
+
+use crate::raft::{
+    ServerId,
+    transport::{
+        RaftMessage,
+        Transport,
+        tcp::{
+            TcpTransportError,
+            connection::TcpConnection,
+            connection_manager::{
+                PeerAddress,
+                TcpConnectionManager,
+            },
+            listener::TcpListenerService,
+        },
+    },
 };
 
-use crate::raft::{ServerId, transport::{RaftMessage, Transport, tcp::{TcpTransportError, connection_manager::{self, PeerAddress, TcpConnectionManager}, listener::TcpListenerService}}};
-
-
-/// How often the TCP transport checks connection health and
-/// performs reconnect attempts.
 const CONNECTION_MAINTENANCE_INTERVAL: Duration =
     Duration::from_millis(100);
 
+const ESTABLISHED_CONNECTION_CAPACITY: usize = 64;
+
 pub struct TcpTransport<C> {
+    /// Identity of the local Raft server.
     local_server_id: ServerId,
 
-    listener: TcpListenerService,
+    /// Address on which this transport listens.
+    listener_address: SocketAddr,
 
+    /// Owns active connections and reader/writer tasks.
     connection_manager: TcpConnectionManager<C>,
 
-    incoming_rx: 
-        tokio::sync::mpsc::Receiver<RaftMessage<C>>,
+    /// Raft messages received from connected peers.
+    incoming_rx: mpsc::Receiver<RaftMessage<C>>,
+
+    /// Established inbound connections awaiting registration.
+    established_rx: mpsc::Receiver<TcpConnection>,
+
+    /// Background task accepting inbound TCP connections.
+    listener_task: JoinHandle<()>,
 }
 
 impl<C> TcpTransport<C>
-where 
+where
     C: serde::Serialize
         + serde::de::DeserializeOwned
         + Send
-        + 'static, 
+        + 'static,
 {
-
+    /// Sends a Raft message through the connection manager.
     pub async fn send_message(
-        &mut self, 
+        &mut self,
         message: RaftMessage<C>,
     ) -> Result<(), TcpTransportError> {
-        self.connection_manager
-            .send(message)
-            .await
+        self.connection_manager.send(message).await
     }
 
-    /// Receives the next Raft message from the transport.
-    ///
-    /// While waiting for a message, this method also handles incoming
-    /// TCP connections and periodically maintains outbound peer
-    /// connections.
-    ///
-    /// It uses tokio::select! to concurrently wait for three
-    /// asynchronous operations:
-    ///
-    /// - Receiving a Raft message from the incoming message channel.
-    /// - Accepting an incoming TCP connection and registering it with
-    ///   the connection manager.
-    /// - Ticking the connection maintenance interval to process
-    ///   connection failures and attempt reconnections.
-    ///
-    /// When a Raft message arrives, the method returns it immediately.
-    /// When a connection is accepted or the maintenance timer ticks,
-    /// the corresponding operation is handled and the method continues
-    /// waiting for the next Raft message.
-    ///
-    /// Returns `None` if the incoming message channel is closed.
+    /// Receives messages while registering inbound connections
+    /// and maintaining outbound peer connections.
     pub async fn receive_message(
-        &mut self, 
+        &mut self,
     ) -> Option<RaftMessage<C>> {
         let mut maintenance =
-            time::interval(
-                CONNECTION_MAINTENANCE_INTERVAL
-            );
+            time::interval(CONNECTION_MAINTENANCE_INTERVAL);
+
+        let mut established_open = true;
 
         loop {
             tokio::select! {
-                message = 
-                    self.incoming_rx.recv() => 
-                {
+                message = self.incoming_rx.recv() => {
                     return message;
                 }
 
-                result =
-                    self.listener.accept(
-                        &mut self.connection_manager,
-                    ) => 
+                connection = self.established_rx.recv(),
+                    if established_open =>
                 {
-                    if let Err(error) = result {
-                        tracing::warn!(
-                            ?error,
-                            "Failed to accept incoming Raft connection"
-                        );
+                    match connection {
+                        Some(connection) => {
+                            if let Err(error) = self
+                                .connection_manager
+                                .register_connection(connection)
+                                .await
+                            {
+                                tracing::warn!(
+                                    ?error,
+                                    "Failed to register inbound connection"
+                                );
+                            }
+                        }
+                        None => {
+                            established_open = false;
+
+                            tracing::warn!(
+                                "Inbound connection channel closed"
+                            );
+                        }
                     }
                 }
 
-                _ = maintenance.tick() =>
-                {
+                _ = maintenance.tick() => {
                     self.connection_manager
-                        .maintain_connections(
-                            Instant::now(),
-                        )
+                        .maintain_connections(Instant::now())
                         .await;
                 }
             }
         }
     }
 
+    /// Registers the next established inbound connection.
     pub async fn accept(
         &mut self,
     ) -> Result<(), TcpTransportError> {
-        self.listener
-            .accept(
-                &mut self.connection_manager,
-            )
+        let connection = self
+            .established_rx
+            .recv()
+            .await
+            .ok_or(TcpTransportError::ConnectionClosed)?;
+
+        self.connection_manager
+            .register_connection(connection)
             .await
     }
 
+    /// Creates the TCP transport and starts its listener task.
     pub async fn bind(
         local_server_id: ServerId,
         listener_address: SocketAddr,
         peers: Vec<PeerAddress>,
     ) -> Result<Self, TcpTransportError> {
-
-        // S1. Get the listener and bind it with the expected listener_address
-        let listener = 
-            TcpListenerService::bind(
-                local_server_id,
-                listener_address,
-            )
-            .await?;
-
-        // S2. Get a connection manager and handle to the incoming receiver
-        let (
-            connection_manager,
-            incoming_rx,
-        ) = TcpConnectionManager::new(
+        let listener = TcpListenerService::bind(
             local_server_id,
-            peers,
-        );
+            listener_address,
+        )
+        .await?;
+
+        let listener_address = listener.local_addr()?;
+
+        // The listener publishes established connections through
+        // this bounded channel.
+        let (established_sender, established_rx) =
+            mpsc::channel(ESTABLISHED_CONNECTION_CAPACITY);
+
+        let listener_task = listener.spawn(established_sender);
+
+        // The connection manager owns established connections
+        // and the incoming Raft message queue.
+        let (connection_manager, incoming_rx) =
+            TcpConnectionManager::new(local_server_id, peers);
 
         Ok(Self {
             local_server_id,
-            listener,
-            connection_manager, 
+            listener_address,
+            connection_manager,
             incoming_rx,
+            established_rx,
+            listener_task,
         })
     }
 
     /// Maintains outbound peer connections.
-    ///
-    /// This drains connection failure events and performs
-    /// reconnect attempts whose backoff timers have expired.
-    pub async fn maintain_connections(
-        &mut self,
-    ) {
+    pub async fn maintain_connections(&mut self) {
         self.connection_manager
-            .maintain_connections(
-                Instant::now(),
-            )
+            .maintain_connections(Instant::now())
             .await;
     }
 
@@ -175,17 +177,14 @@ where
     // ---------- helpers ---------------
     // ----------------------------------
 
-    pub fn local_server_id(
-        &self,
-    ) -> ServerId {
+    pub fn local_server_id(&self) -> ServerId {
         self.local_server_id
     }
 
-    /// Returns the address on which this transport is listening
     pub fn local_addr(
         &self,
     ) -> Result<SocketAddr, TcpTransportError> {
-        self.listener.local_addr()
+        Ok(self.listener_address)
     }
 
     pub fn connection_manager(
@@ -199,32 +198,33 @@ where
     ) -> &mut TcpConnectionManager<C> {
         &mut self.connection_manager
     }
-
 }
 
-impl<C> Transport<C> for TcpTransport<C> 
-where 
+impl<C> Drop for TcpTransport<C> {
+    fn drop(&mut self) {
+        self.listener_task.abort();
+    }
+}
+
+impl<C> Transport<C> for TcpTransport<C>
+where
     C: serde::Serialize
         + serde::de::DeserializeOwned
         + Send
         + 'static,
 {
-
     type Error = TcpTransportError;
 
     async fn send(
-        &mut self, 
+        &mut self,
         message: RaftMessage<C>,
-    ) -> Result<(), TcpTransportError>
-    {
-        self.send_message(message)
-            .await
+    ) -> Result<(), TcpTransportError> {
+        self.send_message(message).await
     }
 
     async fn receive(
         &mut self,
     ) -> Option<RaftMessage<C>> {
-        self.receive_message()
-            .await
+        self.receive_message().await
     }
 }
