@@ -83,6 +83,7 @@ impl ReconnectState {
             self.attempts.saturating_add(1);
 
         // Convert the attempt count into a zero-based exponent.
+        // attempt is purely used for temp computation - don't get confuse
         let attempt =
             self.attempts.saturating_sub(1);
 
@@ -208,14 +209,18 @@ where
         Self,
         mpsc::Receiver<RaftMessage<C>>,
     ) {
+        // Server Id -> SocketAddress
         let mut peer_addresses =
             HashMap::new();
 
+        // Server Id -> Reconnect state
         let mut reconnect_state =
             HashMap::new();
 
         let now = Instant::now();
 
+        // For each known peer - 1) populate the peer address map 
+        // and also the reconnect state
         for peer in peers {
             if peer.server_id == local_server_id {
                 continue;
@@ -234,6 +239,8 @@ where
 
         // Create bounded channels, The mpsc gives us back
         // transmitter (tx) and reciver (rx)
+
+        // This channel is used send and recieve Raft message from peers
         let (
             incoming_message_sender,
             incoming_rx,
@@ -241,6 +248,7 @@ where
             INCOMING_CHANNEL_CAPACITY,
         );
 
+        // This is the channel used to send connection failure events
         let (
             connection_event_sender,
             connection_event_receiver,
@@ -652,6 +660,8 @@ where
     ) {
         // starts an infinite loop
         loop {
+            // This is the first task of reader
+            // Await for the read frames
             let result =
                 TcpConnection::read_frame(
                     &mut read_half,
@@ -665,6 +675,9 @@ where
                     // then we will stop the reader loop
                     // .await is required because we have a queue .. a bounded
                     // queue 
+
+                    // Use the incoming message channel to report new 
+                    // message to the manager
                     if incoming_message_sender
                         .send(message)
                         .await
@@ -677,7 +690,8 @@ where
                         break;
                     }
                 }
-
+                // In case of errors the reader convey that to the 
+                // manager via the channel - connection events
                 Err(_) => {
                     let _ =
                         connection_event_sender
@@ -747,6 +761,7 @@ where
         let peer_id =
             message.to;
 
+        // Get the connection handler for the message.to
         let connection =
             self.connections
                 .get(&peer_id)
@@ -759,6 +774,9 @@ where
                     )
                 })?;
 
+        // We have two workers - Reader and writer and we want to decouple
+        // the send logic here with those
+        // Thus we are using the outgoing_message_(sender/receiver)
         connection
             .outgoing_message_sender
             .send(message)
@@ -778,6 +796,8 @@ where
         &mut self,
         peer_id: ServerId,
     ) {
+        // On connection failure, we have to first abort the two workers
+        // i.e., reader and writer
         if let Some(connection) =
             self.connections.remove(&peer_id)
         {
@@ -785,9 +805,9 @@ where
             connection.writer_task.abort();
         }
 
-        let now =
-            Instant::now();
+        let now = Instant::now();
 
+        // start re-connection attempt
         if let Some(state) =
             self.reconnect_state
                 .get_mut(&peer_id)

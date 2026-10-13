@@ -54,7 +54,6 @@ impl TcpListenerService {
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             loop {
-
                 // Step 1. Ask listener to accept the incoming
                 // client connection
                 let (stream, address) =
@@ -73,9 +72,13 @@ impl TcpListenerService {
                 let sender = established_sender.clone();
 
                 // Step2. Create the TcpConnection based on the stream
+                // Notice we again spawned here.. because we just want our
+                // listener to be block free. As soon as listener got a client
+                // connection and  have the stream, we will let to the 
+                // handshake part again in the non blocking way
                 tokio::spawn(async move {
+
                     // Attempt the handshake in a give timeout
-                    // if done else boom
                     let result = timeout(
                         HANDSHAKE_TIMEOUT,
                         TcpConnection::accept(
@@ -85,12 +88,15 @@ impl TcpListenerService {
                     )
                     .await;
 
+                    // Post handshake the result is either an error in 
+                    // hanshake or Ok.
+                    // If it is Ok
                     match result {
                         Ok(Ok(connection)) => {
                             if sender.send(connection).await.is_err() {
                                 tracing::debug!(
                                     %address,
-                                    "Transport closed before connection registration"
+                                    "Closed before connection registration"
                                 );
                             }
                         }
