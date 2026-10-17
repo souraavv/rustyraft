@@ -46,6 +46,7 @@ pub const MAX_FRAME_SIZE: usize =
 const FRAME_LENGTH_SIZE: usize = 4;
 
 /// Represents one established TCP connection to a peer.
+#[derive(Debug)]
 pub struct TcpConnection {
     /// The local Raft identity.
     local_server_id: ServerId,
@@ -139,8 +140,7 @@ impl TcpConnection {
 
         // I'm attempting to connect to the peer
         // first create the handshake
-        let handshake =
-            Handshake::new(local_server_id);
+        let handshake = Handshake::new(local_server_id);
 
         // Write the handshake frame to the stream
         Self::write_frame(
@@ -162,9 +162,7 @@ impl TcpConnection {
 
         // Make sure the peer is the one we intended
         // to connect to.
-        if peer_handshake.server_id
-            != expected_peer_id
-        {
+        if peer_handshake.server_id != expected_peer_id {
             return Err(
                 TcpTransportError::UnknownPeer(
                     format!(
@@ -178,8 +176,7 @@ impl TcpConnection {
 
         Ok(Self {
             local_server_id,
-            peer_server_id:
-                peer_handshake.server_id,
+            peer_server_id: peer_handshake.server_id,
             stream,
         })
     }
