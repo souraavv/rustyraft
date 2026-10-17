@@ -16,7 +16,7 @@
 //!
 //! It does not contain Raft protocol decisions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -37,6 +37,13 @@ const INITIAL_RECONNECT_DELAY: Duration =
 const MAX_RECONNECT_DELAY: Duration =
     Duration::from_secs(30);
 
+/// Maximum time allowed for TCP connection and handshake.
+const CONNECTION_ATTEMPT_TIMEOUT: Duration =
+    Duration::from_secs(5);
+
+/// Maximum number of concurrent outbound connection attempts.
+const MAX_CONCURRENT_CONNECTION_ATTEMPTS: usize = 16;
+
 /// Maximum number of messages waiting to be sent to one peer.
 const OUTGOING_CHANNEL_CAPACITY: usize = 256;
 
@@ -44,9 +51,10 @@ const OUTGOING_CHANNEL_CAPACITY: usize = 256;
 /// processed by the runtime.
 const INCOMING_CHANNEL_CAPACITY: usize = 256;
 
-/// Maximum number of connection failure events waiting for the
-/// connection manager to process.
+/// Maximum number of connection events waiting to be processed.
 const CONNECTION_EVENT_CAPACITY: usize = 64;
+
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// State used to schedule reconnect attempts for one peer.
 #[derive(Debug, Clone)]
@@ -79,22 +87,18 @@ impl ReconnectState {
     /// it reaches the maximum reconnect delay of 30 seconds.
     fn record_failure(&mut self, now: Instant) {
         // Count this failed connection attempt.
-        self.attempts =
-            self.attempts.saturating_add(1);
+        self.attempts = self.attempts.saturating_add(1);
 
         // Convert the attempt count into a zero-based exponent.
         // attempt is purely used for temp computation - don't get confuse
-        let attempt =
-            self.attempts.saturating_sub(1);
+        let attempt = self.attempts.saturating_sub(1);
 
         // Calculate the exponential multiplier.
         // The exponent is capped to avoid an unnecessarily large value.
-        let multiplier =
-            2u32.pow(attempt.min(10));
+        let multiplier = 2u32.pow(attempt.min(10));
 
         // Calculate the reconnect delay.
-        let mut delay =
-            INITIAL_RECONNECT_DELAY * multiplier;
+        let mut delay = INITIAL_RECONNECT_DELAY * multiplier;
 
         // Do not allow the reconnect delay to exceed the maximum.
         if delay > MAX_RECONNECT_DELAY {
@@ -122,11 +126,24 @@ pub struct PeerAddress {
     pub address: SocketAddr,
 }
 
-/// Event sent by a reader or writer task when a connection fails.
+/// Event sent by connection tasks to the connection manager.
 #[derive(Debug)]
 enum ConnectionEvent {
-    /// The connection to the given peer has failed.
-    Failed(ServerId),
+    /// An outbound connection attempt completed.
+    AttemptCompleted {
+        peer_id: ServerId,
+        result: Result<TcpConnection, TcpTransportError>,
+    },
+
+    /// A reader or writer task detected a connection failure.
+    ///
+    /// The connection ID prevents a delayed event from removing
+    /// a newer connection to the same peer.
+    Failed {
+        peer_id: ServerId,
+        connection_id: u64,
+        error: TcpTransportError,
+    },
 }
 
 /// State associated with one active peer connection.
@@ -135,6 +152,9 @@ enum ConnectionEvent {
 /// The manager only keeps the channel used to send messages to the
 /// writer and the task handles used to manage their lifecycle.
 struct PeerConnection<C> {
+    /// Unique identity of this registered connection.
+    connection_id: u64,
+
     /// Channel used to send outgoing messages to the writer task.
     outgoing_message_sender: mpsc::Sender<RaftMessage<C>>,
 
@@ -158,26 +178,31 @@ pub struct TcpConnectionManager<C> {
     peers: HashMap<ServerId, SocketAddr>,
 
     /// Currently active TCP connections.
-    connections:
-        HashMap<ServerId, PeerConnection<C>>,
+    connections: HashMap<ServerId, PeerConnection<C>>,
 
     /// Reconnect state for peers whose connections are unavailable.
-    reconnect_state:
-        HashMap<ServerId, ReconnectState>,
+    reconnect_state: HashMap<ServerId, ReconnectState>,
+
+    /// Peers with outbound connection attempts currently in flight.
+    in_flight_attempts: HashSet<ServerId>,
+
+    /// ID assigned to the next registered connection.
+    next_connection_id: u64,
 
     /// Sends decoded Raft messages from reader tasks to the
     /// transport.
-    incoming_message_sender:
-        mpsc::Sender<RaftMessage<C>>,
+    incoming_message_sender: mpsc::Sender<RaftMessage<C>>,
 
-    /// Receives connection failure events from reader and writer
-    /// tasks.
-    connection_event_receiver:
-        mpsc::Receiver<ConnectionEvent>,
+    /// Receives connection events from reader, writer, and
+    /// outbound connection tasks.
+    connection_event_receiver: mpsc::Receiver<ConnectionEvent>,
 
-    /// Sender used by reader and writer tasks to report failures.
-    connection_event_sender:
-        mpsc::Sender<ConnectionEvent>,
+    /// Sender used by connection tasks to report events.
+    connection_event_sender: mpsc::Sender<ConnectionEvent>,
+
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    shutdown_rx: tokio::sync::watch::Receiver<bool>,
+    connection_attempt_tasks: HashMap<ServerId, JoinHandle<()>>,
 }
 
 impl<C> TcpConnectionManager<C>
@@ -193,15 +218,16 @@ where
     /// used by `TcpTransport`.
     ///
     /// Reader tasks push decoded Raft messages into this queue.
-    /// 
-    /// Send trait is required  - it is safe to transfer ownership
+    ///
+    /// Send trait is required - it is safe to transfer ownership
     /// of this value to another thread - required because tokio
-    /// may execute spawn task on a separate worker thread
-    /// 
-    /// 'static  - means that this type does not contains
-    /// references that are requried valie from short lifetime
-    /// We need both serialize and desrialize bcz we want to 
-    /// encode outgoing message and decode incoming message
+    /// may execute spawn task on a separate worker thread.
+    ///
+    /// 'static means that this type does not contain references
+    /// that are required to remain valid for a shorter lifetime.
+    ///
+    /// We need both serialize and deserialize because we want to
+    /// encode outgoing messages and decode incoming messages.
     pub fn new(
         local_server_id: ServerId,
         peers: Vec<PeerAddress>,
@@ -210,66 +236,58 @@ where
         mpsc::Receiver<RaftMessage<C>>,
     ) {
         // Server Id -> SocketAddress
-        let mut peer_addresses =
-            HashMap::new();
+        let mut peer_addresses = HashMap::new();
 
         // Server Id -> Reconnect state
-        let mut reconnect_state =
-            HashMap::new();
+        let mut reconnect_state = HashMap::new();
 
         let now = Instant::now();
 
-        // For each known peer - 1) populate the peer address map 
-        // and also the reconnect state
+        // For each known peer:
+        // 1) populate the peer address map
+        // 2) populate the reconnect state
         for peer in peers {
             if peer.server_id == local_server_id {
                 continue;
             }
 
-            peer_addresses.insert(
-                peer.server_id,
-                peer.address,
-            );
-
+            peer_addresses.insert(peer.server_id, peer.address);
             reconnect_state.insert(
                 peer.server_id,
                 ReconnectState::new(now),
             );
         }
 
-        // Create bounded channels, The mpsc gives us back
-        // transmitter (tx) and reciver (rx)
+        // Create bounded channels. The mpsc gives us back
+        // transmitter (tx) and receiver (rx).
 
-        // This channel is used send and recieve Raft message from peers
-        let (
-            incoming_message_sender,
-            incoming_rx,
-        ) = mpsc::channel(
-            INCOMING_CHANNEL_CAPACITY,
-        );
+        // This channel is used to send and receive Raft messages
+        // from peers.
+        let (incoming_message_sender, incoming_rx) =
+            mpsc::channel(INCOMING_CHANNEL_CAPACITY);
 
-        // This is the channel used to send connection failure events
-        let (
-            connection_event_sender,
-            connection_event_receiver,
-        ) = mpsc::channel(
-            CONNECTION_EVENT_CAPACITY,
-        );
+        // This channel is used to send and receive connection events.
+        let (connection_event_sender, connection_event_receiver) =
+            mpsc::channel(CONNECTION_EVENT_CAPACITY);
+        let (shutdown_tx, shutdown_rx) = 
+            tokio::sync::watch::channel(false);
 
         let manager = Self {
             local_server_id,
             peers: peer_addresses,
             connections: HashMap::new(),
             reconnect_state,
+            in_flight_attempts: HashSet::new(),
+            next_connection_id: 1,
             incoming_message_sender,
             connection_event_receiver,
             connection_event_sender,
+            shutdown_rx,
+            shutdown_tx,
+            connection_attempt_tasks: HashMap::new(),
         };
 
-        (
-            manager,
-            incoming_rx,
-        )
+        (manager, incoming_rx)
     }
 
     /// Returns the local Raft server identity.
@@ -278,17 +296,18 @@ where
     }
 
     /// Returns whether a connection to the given peer exists.
-    pub fn contains(
-        &self,
-        peer_id: ServerId,
-    ) -> bool {
-        self.connections
-            .contains_key(&peer_id)
+    pub fn contains(&self, peer_id: ServerId) -> bool {
+        self.connections.contains_key(&peer_id)
     }
 
     /// Returns the number of currently active connections.
     pub fn len(&self) -> usize {
         self.connections.len()
+    }
+
+    /// Returns whether there are no active connections.
+    pub fn is_empty(&self) -> bool {
+        self.connections.is_empty()
     }
 
     /// Returns whether this node owns the outbound connection to
@@ -303,47 +322,74 @@ where
     }
 
     /// Maintains outbound connections.
-    /// 
-    /// This is about the health of the peer connections
-    /// 
-    /// The connection reader/writer tasks run indepedently 
-    /// in the background; when one of them finishes or fails, 
-    /// they send an event such as ConnectionClosed or
-    /// ConnectionFailed into the connection_event_receiver 
-    /// 
-    /// This method periodicially comes alongs and first drain
-    /// those events in the proces connection events 
-    /// - so that manager can remove dead connections 
-    /// - mark the peers as disconnected
-    /// 
-    /// So in short - 
-    ///  Background connection task detect failures -> send events
-    ///  -> maintain_connection() picks up those events and 
-    ///     update the state and reconnect logic runs
     ///
-    /// This method performs any reconnect attempts whose backoff
-    /// timers have expired.
+    /// This is about the health of the peer connections.
+    ///
+    /// The connection reader/writer tasks run independently
+    /// in the background. When one detects a failure, it sends
+    /// an event to the connection manager.
+    ///
+    /// Background connection tasks detect failures, send events,
+    /// and `maintain_connections()` processes those events to
+    /// update connection state and reconnect logic.
+    ///
+    /// This method performs reconnect attempts whose backoff timers
+    /// have expired. Actual connection attempts run in independent
+    /// Tokio tasks, so one slow peer does not block other peers.
     ///
     /// It deliberately does not sleep. The caller controls how often
     /// this method is invoked.
-    pub async fn maintain_connections(
-        &mut self,
-        now: Instant,
-    ) {
-        self.process_connection_events();
+    pub async fn maintain_connections(&mut self, now: Instant) {
+        // Do not schedule or process new work after shutdown.
+        if self.is_shutting_down() {
+            return;
+        }
 
-        let peers: Vec<ServerId> =
-            self.peers.keys().copied().collect();
+        self.process_connection_events().await;
+
+        // Shutdown may have started while processing events.
+        if self.is_shutting_down() {
+            return;
+        }
+
+        let available_slots = MAX_CONCURRENT_CONNECTION_ATTEMPTS
+            .saturating_sub(self.in_flight_attempts.len());
+
+        if available_slots == 0 {
+            return;
+        }
+
+        let mut peers: Vec<ServerId> = self.peers.keys().copied().collect();
+        peers.sort();
+
+        let mut scheduled = 0;
 
         for peer_id in peers {
+            if self.is_shutting_down() {
+                break;
+            }
+
+            // Stop once the bounded number of attempts is scheduled.
+            if scheduled >= available_slots {
+                break;
+            }
+
+            // The lower server ID owns the outbound connection.
             if !self.owns_outbound_connection(peer_id) {
                 continue;
             }
 
+            // Skip peers that already have an established connection.
             if self.connections.contains_key(&peer_id) {
                 continue;
             }
 
+            // Avoid duplicate outbound connection attempts.
+            if self.in_flight_attempts.contains(&peer_id) {
+                continue;
+            }
+
+            // Check whether the reconnect backoff has expired.
             let should_attempt = self
                 .reconnect_state
                 .get(&peer_id)
@@ -354,149 +400,248 @@ where
                 continue;
             }
 
-            self.try_connect(
-                peer_id,
-                now,
-            )
-            .await;
+            // Look up the address registered for this peer.
+            let address = match self.peers.get(&peer_id) {
+                Some(address) => *address,
+                None => continue,
+            };
+
+            // Mark the peer before spawning the task.
+            self.in_flight_attempts.insert(peer_id);
+
+            let local_server_id = self.local_server_id;
+            let event_sender = self.connection_event_sender.clone();
+            let mut shutdown_rx = self.shutdown_rx.clone();
+
+            // Establish the connection and perform the handshake
+            // independently so other peers remain available.
+            let handle = tokio::spawn(async move {
+                let result = tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        return;
+                    }
+
+                    result = tokio::time::timeout(
+                        CONNECTION_ATTEMPT_TIMEOUT,
+                        async {
+                            // Connect to the peer.
+                            let stream =
+                                tokio::net::TcpStream::connect(address)
+                                    .await?;
+
+                            // Perform the connection handshake and
+                            // protocol validation.
+                            TcpConnection::establish(
+                                stream,
+                                local_server_id,
+                                peer_id,
+                            )
+                            .await
+                        },
+                    ) => {
+                        result.unwrap_or_else(|_| {
+                            Err(TcpTransportError::ConnectionFailed(
+                                format!(
+                                    "connection attempt to {:?} timed out",
+                                    peer_id,
+                                ),
+                            ))
+                        })
+                    }
+                };
+
+                // Let the manager update connection and reconnect state.
+                let _ = event_sender
+                    .send(ConnectionEvent::AttemptCompleted {
+                        peer_id,
+                        result,
+                    })
+                    .await;
+            });
+
+            // Retain the handle so shutdown can cancel and await it.
+            self.connection_attempt_tasks.insert(peer_id, handle);
+
+            scheduled += 1;
         }
     }
 
-    /// Processes connection failure events reported by reader and
-    /// writer tasks.
+    /// Processes connection events reported by connection tasks.
     ///
     /// The tasks themselves do not modify the connection manager.
-    /// They only report that their connection has failed.
-    fn process_connection_events(&mut self) {
-        // try_recv : try to recieve a value from the rx (reciver)
-        // without waiting
+    /// They only report results through the event channel.
+    async fn process_connection_events(&mut self) {
+        // try_recv receives a value without waiting for a future event.
         while let Ok(event) =
             self.connection_event_receiver.try_recv()
         {
             match event {
-                ConnectionEvent::Failed(peer_id) => {
-                    self.connection_failed(
-                        peer_id,
+                ConnectionEvent::AttemptCompleted {
+                    peer_id,
+                    result,
+                } => {
+                    self.in_flight_attempts.remove(&peer_id);
+
+                    match result {
+                        Ok(connection) => {
+                            // An inbound connection might have been
+                            // registered while this attempt was running.
+                            if self.connections.contains_key(&peer_id) {
+                                continue;
+                            }
+
+                            // here manager will do mutation to the reconnection
+                            // state as we are good to connect, we will 
+                            // reset that and in case of error we will record
+                            // a failure - which means one less attempt retry
+                            // attempt from the total reamining retries (if any)
+                            match self.register_connection(connection).await {
+                                Ok(()) => {
+                                    if let Some(state) =
+                                        self.reconnect_state.get_mut(&peer_id)
+                                    {
+                                        state.reset(Instant::now());
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::debug!(
+                                        ?peer_id,
+                                        %error,
+                                        "failed to register connection"
+                                    );
+
+                                    if let Some(state) =
+                                        self.reconnect_state.get_mut(&peer_id)
+                                    {
+                                        state.record_failure(Instant::now());
+                                    }
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                ?peer_id,
+                                %error,
+                                "outbound connection attempt failed"
+                            );
+
+                            if let Some(state) =
+                                self.reconnect_state.get_mut(&peer_id)
+                            {
+                                state.record_failure(Instant::now());
+                            }
+                        }
+                    }
+                }
+                // The connection failed event is send by - eithe rreader
+                // or writer task and as response for such event the manager
+                // has to close every thing - stop reader and writer task
+                ConnectionEvent::Failed {
+                    peer_id,
+                    connection_id,
+                    error,
+                } => {
+                    tracing::warn!(
+                        ?peer_id,
+                        connection_id,
+                        %error,
+                        "TCP connection failed"
                     );
+
+                    // Ignore failures reported by an older connection.
+                    let is_current = self
+                        .connections
+                        .get(&peer_id)
+                        .map(|connection| {
+                            connection.connection_id == connection_id
+                        })
+                        .unwrap_or(false);
+
+                    if is_current {
+                        self.connection_failed(peer_id, connection_id);
+                    }
                 }
             }
         }
     }
 
-    /// Attempts to establish one outbound connection.
-    ///
-    /// A failed attempt updates reconnect backoff but does not
-    /// propagate the connection failure into the Raft protocol.
-    async fn try_connect(
-        &mut self,
-        peer_id: ServerId,
-        now: Instant,
-    ) {
-        let address =
-            match self.peers.get(&peer_id) {
-                Some(address) => *address,
-                None => return,
-            };
-
-        let result = self
-            .connect(
-                peer_id,
-                address,
-            )
-            .await;
-
-        if result.is_ok() {
-            // The connection succeeded, so reset the reconnect
-            // state back to zero attempts.
-            if let Some(state) =
-                self.reconnect_state
-                    .get_mut(&peer_id)
-            {
-                state.reset(now);
-            }
-
-            return;
-        }
-
-        // The connection attempt failed, so record the failure.
-        if let Some(state) =
-            self.reconnect_state
-                .get_mut(&peer_id)
-        {
-            state.record_failure(now);
-        }
-    }
-
     /// Creates an outbound connection to a peer immediately.
     ///
-    /// This method is used by the maintenance logic. It may also be
-    /// useful during initial startup when the caller wants to
-    /// establish connections eagerly.
+    /// This method can also be used during initial startup when the
+    /// caller wants to establish a connection eagerly.
     pub async fn connect(
         &mut self,
         peer_id: ServerId,
         address: SocketAddr,
     ) -> Result<(), TcpTransportError> {
+        if self.is_shutting_down() {
+            return Err(TcpTransportError::TransportShuttingDown);
+        }
+        // Case 1. We should not connect our self
         if peer_id == self.local_server_id {
-            return Err(
-                TcpTransportError::UnknownPeer(
-                    "cannot connect to the local server"
-                        .to_string(),
-                ),
-            );
+            return Err(TcpTransportError::UnknownPeer(
+                "cannot connect to the local server".to_string(),
+            ));
         }
 
+        // Case 2. We must be aware of the peer, we are having
+        // some faith in who ever populated the peers known to
+        // me
         if !self.peers.contains_key(&peer_id) {
-            return Err(
-                TcpTransportError::UnknownPeer(
-                    format!(
-                        "peer {:?} is not configured",
-                        peer_id,
-                    ),
-                ),
-            );
+            return Err(TcpTransportError::UnknownPeer(
+                format!("peer {:?} is not configured", peer_id),
+            ));
         }
 
+        // Case 3. This is the contract to avoid race conditions
+        // We are allowing outbond connection based on the following
+        // policy - server with lower only can initiate outbound connection
         if !self.owns_outbound_connection(peer_id) {
-            return Err(
-                TcpTransportError::UnknownPeer(
-                    format!(
-                        "server {:?} does not own the outbound \
-                         connection to peer {:?}",
-                        self.local_server_id,
-                        peer_id,
-                    ),
+            return Err(TcpTransportError::UnknownPeer(
+                format!(
+                    "server {:?} does not own the outbound connection \
+                     to peer {:?}",
+                    self.local_server_id,
+                    peer_id,
                 ),
-            );
+            ));
         }
 
+        // Case 4. Already connected.
         if self.connections.contains_key(&peer_id) {
             return Ok(());
         }
 
-        let stream =
-            tokio::net::TcpStream::connect(
-                address,
-            )
-            .await?;
+        // Case 5. If not so far, then attempt to connect 
+        // in a timeout 
+        let result = tokio::time::timeout(
+            CONNECTION_ATTEMPT_TIMEOUT,
+            async {
+                let stream =
+                    tokio::net::TcpStream::connect(address).await?;
 
-        // connection manager pass the ownership of the stream down to the
-        // connection.rs (TcpConnection) - thus we have mut TcpSTream
-        let connection =
-            TcpConnection::establish(
-                stream,
-                self.local_server_id,
-                peer_id,
-            )
-            .await?;
-
-        // 
-        self.register_connection(
-            connection,
+                TcpConnection::establish(
+                    stream,
+                    self.local_server_id,
+                    peer_id,
+                )
+                .await
+            },
         )
-        .await?;
+        .await
+        .unwrap_or_else(|_| {
+            Err(TcpTransportError::ConnectionFailed(
+                format!(
+                    "connection attempt to {:?} timed out",
+                    peer_id,
+                ),
+            ))
+        })?;
 
-        Ok(())
+        // start the registeration - this is a multi step process
+        // we create channels and we spawn reader and writer task
+        // reset the reconnect states
+        self.register_connection(result).await
     }
 
     /// Registers an already-established connection.
@@ -511,42 +656,42 @@ where
         &mut self,
         connection: TcpConnection,
     ) -> Result<(), TcpTransportError> {
-        let peer_id =
-            connection.peer_server_id();
 
-        // I can't make a connection to myself, reject all just registrations
+        if self.is_shutting_down() {
+            return Err(TcpTransportError::TransportShuttingDown);
+        }
+
+        let peer_id = connection.peer_server_id();
+
+        // I can't make a connection to myself, reject all such
+        // registrations.
         if peer_id == self.local_server_id {
-            return Err(
-                TcpTransportError::UnknownPeer(
-                    "connection points to the local server"
-                        .to_string(),
-                ),
-            );
+            return Err(TcpTransportError::UnknownPeer(
+                "connection points to the local server".to_string(),
+            ));
         }
 
-        // This peer of connection must be a known peer to me, if i don't
-        // know then reject the connection
+        // This peer must be known to me. If I don't know it,
+        // reject the connection.
         if !self.peers.contains_key(&peer_id) {
-            return Err(
-                TcpTransportError::UnknownPeer(
-                    format!(
-                        "peer {:?} is not configured",
-                        peer_id,
-                    ),
-                ),
-            );
+            return Err(TcpTransportError::UnknownPeer(
+                format!("peer {:?} is not configured", peer_id),
+            ));
         }
 
-        // Replace an existing connection to the same peer.
-        //
-        // This can happen when a new inbound connection arrives
-        // while an older connection is still registered.
+        // Never replace an existing connection implicitly.
+        // Replacing a healthy connection can interrupt message delivery.
         if self.connections.contains_key(&peer_id) {
-            self.remove(peer_id);
+            return Err(TcpTransportError::ConnectionFailed(
+                format!(
+                    "connection to peer {:?} already exists",
+                    peer_id,
+                ),
+            ));
         }
 
-        // Get the access to the reader and writer stream - so that we can
-        // work indepedently on these two halfs
+        // Get access to the reader and writer halves so that they
+        // can work independently.
         let (
             _local_server_id,
             peer_id,
@@ -554,88 +699,87 @@ where
             write_half,
         ) = connection.split();
 
-        // Create a async channel (bounded) with two ends
-        // outgoing_message_sender (sender) and outgoing_message_receiver (receiver)
-        // The reason we have channel is bcz we want writing and sending
-        // task to be taken by two different entity
-        // outgoing_message_sender enqueue the outgoing RaftMessages
-        // whlie outgoing_message_receiver take that message -> serialize this -> send to the
-        // tcpConnection. This decoupled both the manager and the writer
-        // if queue is full, an async send using .send().await wait until
-        // space become available, providing backpressure instead of unlimited
-        // backlog
+        // Decoupling the RAFT and transport
+        // Create an async channel with a sender and receiver.
+        // The sender enqueues outgoing RaftMessages. The writer
+        // receives them, serializes them, and writes them to TCP.
+        // This decouples message submission from network writes.
+        //
+        // If the bounded queue is full, send().await waits until
+        // space becomes available, providing backpressure instead
+        // of allowing an unlimited backlog.
         let (
             outgoing_message_sender,
             outgoing_message_receiver,
-        ) = mpsc::channel(
-            OUTGOING_CHANNEL_CAPACITY,
-        );
+        ) = mpsc::channel(OUTGOING_CHANNEL_CAPACITY);
 
-        // We are creating more clones of senders
-        // These are the sender which sends messages into the incoming 
-        // message queue 
+        // Assign a unique ID to this registered connection.
+        // Reader/writer failures include this ID so stale events
+        // cannot remove a replacement connection.
+        let connection_id = self.next_connection_id;
+        self.next_connection_id =
+            self.next_connection_id.wrapping_add(1).max(1);
+
+        // Clone the sender used to put incoming messages into the
+        // central incoming-message queue.
+        // These messages are consumed by the manager, we will hand over
+        // this to the reader - purely for messages, event are on other
+        // channel
         let incoming_message_sender =
             self.incoming_message_sender.clone();
 
-        // We are creating a clone of the connection event sender as well
-        // we will pass the incoming message sender and connection event
-        // sender to the asyn task which is reader task.
-
-        let connection_event_sender =
+        // Clone the connection event sender for the reader task.
+        let reader_event_sender =
             self.connection_event_sender.clone();
 
-        // We are giving handle to the reader half of the tcp stream to this 
-        // reader task, this is the stream that connection.rs replied to us
-        // and we have created extra handles for the incoming messages and
-        // connection event sender ... remember these are sender to the messgage
-        // queue
-        let reader_task =
-            tokio::spawn(async move {
-                // future do nothing unless we poll or await
-                Self::run_reader(
-                    peer_id,
-                    read_half,
-                    incoming_message_sender,
-                    connection_event_sender,
-                )
-                .await;
-            });
-
-        // Again one more clone of sender (mpsc) connection event 
-        // we will pass this handle to the writer 
-        let connection_event_sender =
-            self.connection_event_sender.clone();
+        let reader_shutdown_rx = self.shutdown_rx.clone();
+        // Give ownership of the TCP read half to the reader task.
+        // The task also receives handles for incoming messages
+        // and connection events.
         
-        // writer task - consumes the write half of the tcp stream
-        let writer_task =
-            // note that we are sending ownership of receiver and sender here
-            tokio::spawn(async move {
-                Self::run_writer(
-                    peer_id,
-                    write_half,
-                    outgoing_message_receiver,
-                    connection_event_sender,
-                )
-                .await;
-            });
+        let reader_task = tokio::spawn(async move {
+            Self::run_reader(
+                peer_id,
+                connection_id,
+                read_half,
+                incoming_message_sender,
+                reader_event_sender,
+                reader_shutdown_rx,
+            )
+            .await;
+        });
 
-        // keep handle to the peer connection
-        let peer_connection =
-            PeerConnection {
-                outgoing_message_sender,
-                reader_task,
-                writer_task,
-            };
+        // Clone the connection event sender for the writer task.
+        let writer_event_sender =
+            self.connection_event_sender.clone();
 
-        self.connections.insert(
-            peer_id,
-            peer_connection,
-        );
+        let writer_shutdown_rx = self.shutdown_rx.clone();
 
-        if let Some(state) =
-            self.reconnect_state
-                .get_mut(&peer_id)
-        {
+        // The writer task owns the write half of the TCP stream.
+        // It consumes messages from the outgoing channel.
+        let writer_task = tokio::spawn(async move {
+            Self::run_writer(
+                peer_id,
+                connection_id,
+                write_half,
+                outgoing_message_receiver,
+                writer_event_sender,
+                writer_shutdown_rx,
+            )
+            .await;
+        });
+
+        // Keep handles to the peer connection and its worker tasks.
+        let peer_connection = PeerConnection {
+            connection_id,
+            outgoing_message_sender,
+            reader_task,
+            writer_task,
+        };
+
+        self.connections.insert(peer_id, peer_connection);
+        // Reset the reconnect state
+        if let Some(state) = self.reconnect_state.get_mut(&peer_id) {
             state.reset(Instant::now());
         }
 
@@ -651,100 +795,103 @@ where
     /// incoming channel.
     async fn run_reader(
         peer_id: ServerId,
-        mut read_half:
-            tokio::net::tcp::OwnedReadHalf,
-        incoming_message_sender:
-            mpsc::Sender<RaftMessage<C>>,
-        connection_event_sender:
-            mpsc::Sender<ConnectionEvent>,
+        connection_id: u64,
+        mut read_half: tokio::net::tcp::OwnedReadHalf,
+        incoming_tx: mpsc::Sender<RaftMessage<C>>,
+        event_tx: mpsc::Sender<ConnectionEvent>,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
-        // starts an infinite loop
         loop {
-            // This is the first task of reader
-            // Await for the read frames
-            let result =
-                TcpConnection::read_frame(
-                    &mut read_half,
-                )
-                .await;
+            if *shutdown_rx.borrow() {
+                break;
+            }
 
-            match result {
-                Ok(message) => {
-                    // try to send the message to the incoming message
-                    // queue and wait until it is sent. if sending fails
-                    // then we will stop the reader loop
-                    // .await is required because we have a queue .. a bounded
-                    // queue 
+            let result = tokio::select! {
+                biased;
 
-                    // Use the incoming message channel to report new 
-                    // message to the manager
-                    if incoming_message_sender
-                        .send(message)
-                        .await
-                        .is_err()
-                    {
-                        // The transport is no longer receiving
-                        // messages, so there is no reason to keep
-                        // the reader task alive.
-                        // 
-                        break;
-                    }
-                }
-                // In case of errors the reader convey that to the 
-                // manager via the channel - connection events
-                Err(_) => {
-                    let _ =
-                        connection_event_sender
-                            .send(
-                                ConnectionEvent::Failed(
-                                    peer_id,
-                                ),
-                            )
+                _ = shutdown_rx.changed() => break,
+                result = TcpConnection::read_frame(&mut read_half) => result,
+            };
+
+            let message = match result {
+                Ok(message) => message,
+                Err(error) => {
+                    if !*shutdown_rx.borrow() {
+                        let _ = event_tx
+                            .send(ConnectionEvent::Failed {
+                                peer_id,
+                                connection_id,
+                                error,
+                            })
                             .await;
-
+                    }
                     break;
                 }
+            };
+
+            let sent = tokio::select! {
+                biased;
+
+                _ = shutdown_rx.changed() => false,
+                result = incoming_tx.send(message) => result.is_ok(),
+            };
+
+            if !sent {
+                break;
             }
         }
     }
-
     /// Runs the writer task for one peer.
     ///
     /// The writer task owns the write half of the TCP connection and
     /// waits for messages from the peer-specific outgoing channel.
     async fn run_writer(
         peer_id: ServerId,
-        mut write_half:
-            tokio::net::tcp::OwnedWriteHalf,
-        mut outgoing_message_receiver:
-            mpsc::Receiver<RaftMessage<C>>,
-        connection_event_sender:
-            mpsc::Sender<ConnectionEvent>,
+        connection_id: u64,
+        mut write_half: tokio::net::tcp::OwnedWriteHalf,
+        mut outgoing_rx: mpsc::Receiver<RaftMessage<C>>,
+        event_tx: mpsc::Sender<ConnectionEvent>,
+        mut shutdown_rx: tokio::sync::watch::Receiver<bool>,
     ) {
-        while let Some(message) =
-            outgoing_message_receiver.recv().await
-        {
-            if TcpConnection::write_frame(
-                &mut write_half,
-                message,
-            )
-            .await
-            .is_err()
-            {
-                let _ =
-                    connection_event_sender
-                        .send(
-                            ConnectionEvent::Failed(
-                                peer_id,
-                            ),
-                        )
-                        .await;
+        loop {
+            if *shutdown_rx.borrow() {
+                break;
+            }
 
+            let message = tokio::select! {
+                biased;
+
+                _ = shutdown_rx.changed() => break,
+                message = outgoing_rx.recv() => match message {
+                    Some(message) => message,
+                    None => break,
+                },
+            };
+
+            let result = tokio::select! {
+                biased;
+
+                _ = shutdown_rx.changed() => break,
+                result = TcpConnection::write_frame(
+                    &mut write_half,
+                    message,
+                ) => result,
+            };
+
+            if let Err(error) = result {
+                if !*shutdown_rx.borrow() {
+                    let _ = event_tx
+                        .send(ConnectionEvent::Failed {
+                            peer_id,
+                            connection_id,
+                            error,
+                        })
+                        .await;
+                }
                 break;
             }
         }
     }
-
 
     /// Sends a Raft message through the writer task associated with
     /// the destination peer.
@@ -758,61 +905,60 @@ where
         &mut self,
         message: RaftMessage<C>,
     ) -> Result<(), TcpTransportError> {
-        let peer_id =
-            message.to;
+        let peer_id = message.to;
 
-        // Get the connection handler for the message.to
-        let connection =
-            self.connections
-                .get(&peer_id)
-                .ok_or_else(|| {
-                    TcpTransportError::ConnectionFailed(
-                        format!(
-                            "no connection to peer {:?}",
-                            peer_id,
-                        ),
-                    )
-                })?;
+        // Get the connection handler for message.to.
+        let connection = self
+            .connections
+            .get(&peer_id)
+            .ok_or_else(|| {
+                TcpTransportError::ConnectionFailed(
+                    format!("no connection to peer {:?}", peer_id),
+                )
+            })?;
 
-        // We have two workers - Reader and writer and we want to decouple
-        // the send logic here with those
-        // Thus we are using the outgoing_message_(sender/receiver)
+        // We have two workers: reader and writer.
+        // The outgoing channel decouples sending from writing.
         connection
             .outgoing_message_sender
             .send(message)
             .await
-            .map_err(|_| {
-                TcpTransportError::ConnectionClosed
-            })
+            .map_err(|_| TcpTransportError::ConnectionClosed)
     }
 
     /// Marks a connection as failed.
     ///
-    /// The connection is removed immediately and the reconnect
-    /// state is updated. The actual reconnect attempt happens when
-    /// `maintain_connections()` observes that the backoff has
-    /// expired.
+    /// The connection is removed and reconnect backoff is updated.
+    /// The actual reconnect attempt happens when maintenance observes
+    /// that the backoff has expired.
     fn connection_failed(
         &mut self,
         peer_id: ServerId,
+        connection_id: u64,
     ) {
-        // On connection failure, we have to first abort the two workers
-        // i.e., reader and writer
-        if let Some(connection) =
-            self.connections.remove(&peer_id)
-        {
+        // Check the connection ID again before removing anything.
+        // This guards against stale failure events.
+        let is_current = self
+            .connections
+            .get(&peer_id)
+            .map(|connection| connection.connection_id == connection_id)
+            .unwrap_or(false);
+
+        if !is_current {
+            return;
+        }
+
+        // The handler give us `abort` option 
+        // On connection failure, abort the two workers:
+        // the reader and the writer.
+        if let Some(connection) = self.connections.remove(&peer_id) {
             connection.reader_task.abort();
             connection.writer_task.abort();
         }
 
-        let now = Instant::now();
-
-        // start re-connection attempt
-        if let Some(state) =
-            self.reconnect_state
-                .get_mut(&peer_id)
-        {
-            state.record_failure(now);
+        // Start reconnect backoff.
+        if let Some(state) = self.reconnect_state.get_mut(&peer_id) {
+            state.record_failure(Instant::now());
         }
     }
 
@@ -820,13 +966,8 @@ where
     ///
     /// This is useful when the caller intentionally removes a peer
     /// or is shutting down the node.
-    pub fn remove(
-        &mut self,
-        peer_id: ServerId,
-    ) {
-        if let Some(connection) =
-            self.connections.remove(&peer_id)
-        {
+    pub fn remove(&mut self, peer_id: ServerId) {
+        if let Some(connection) = self.connections.remove(&peer_id) {
             connection.reader_task.abort();
             connection.writer_task.abort();
         }
@@ -836,11 +977,59 @@ where
     ///
     /// The reader and writer tasks are stopped. The TCP stream is
     /// closed when the owned halves are dropped by those tasks.
-    pub fn shutdown(
-        &mut self,
-        peer_id: ServerId,
-    ) {
-        self.remove(peer_id);
+    pub async fn shutdown(&mut self) {
+        // Signal all shutdown-aware tasks to stop.
+        let _ = self.shutdown_tx.send(true);
+
+        // Cancel and await outstanding connection attempts.
+        let attempts = 
+                std::mem::take(&mut self.connection_attempt_tasks);
+        for (_, mut handle) in attempts {
+            if tokio::time::timeout(
+                SHUTDOWN_TIMEOUT,
+                &mut handle,
+            )
+            .await
+            .is_err()
+            {
+                handle.abort();
+                let _ = handle.await;
+            }
+        }
+
+        self.in_flight_attempts.clear();
+
+        // Remove connections and wait for their workers to stop.
+        let connections = 
+                std::mem::take(&mut self.connections);
+        for (_, connection) in connections {
+            drop(connection.outgoing_message_sender);
+
+            let mut reader = connection.reader_task;
+            let mut writer = connection.writer_task;
+
+            if tokio::time::timeout(
+                SHUTDOWN_TIMEOUT,
+                &mut reader,
+            )
+            .await
+            .is_err()
+            {
+                reader.abort();
+                let _ = reader.await;
+            }
+
+            if tokio::time::timeout(
+                SHUTDOWN_TIMEOUT,
+                &mut writer,
+            )
+            .await
+            .is_err()
+            {
+                writer.abort();
+                let _ = writer.await;
+            }
+        }
     }
 
     /// Returns a reference to the outgoing channel for a peer.
@@ -851,13 +1040,14 @@ where
     pub fn writer(
         &self,
         peer_id: ServerId,
-    ) -> Option<
-        &mpsc::Sender<RaftMessage<C>>
-    > {
+    ) -> Option<&mpsc::Sender<RaftMessage<C>>> {
         self.connections
             .get(&peer_id)
-            .map(|connection|
-                &connection.outgoing_message_sender
-            )
+            .map(|connection| &connection.outgoing_message_sender)
     }
+
+    fn is_shutting_down(&self) -> bool {
+        *self.shutdown_rx.borrow()
+    }
+
 }

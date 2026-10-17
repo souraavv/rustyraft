@@ -1,4 +1,5 @@
-//! TCP transport implementation.
+
+ //! TCP transport implementation.
 
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -66,9 +67,10 @@ where
 
     /// Receives messages while registering inbound connections
     /// and maintaining outbound peer connections.
-    /// The name says receive message
-    /// Message type can be different - These are events for which 
-    /// we have to respond
+    ///
+    /// The name says receive message.
+    /// Message type can be different - these are events for which
+    /// we have to respond.
     pub async fn receive_message(
         &mut self,
     ) -> Option<RaftMessage<C>> {
@@ -79,33 +81,37 @@ where
 
         loop {
             // We are using select because we have multiple things
-            // to address but we dont' want to block on any. So 
-            // tokio:;select is like which ever finish i will suspends
-            // my probe for other and done with this.. that's why this is in 
-            // loop { }
+            // to address but we don't want to block on any. So
+            // tokio::select! waits for whichever branch is ready.
+            // This is why it is inside a loop.
             tokio::select! {
                 // On the incoming message receiver channel we are
-                // waiting for the message (recv) 
+                // waiting for the message (recv).
 
-                // Branch 1-  Got a new message ?
+                // Branch 1 - Got a new message?
                 message = self.incoming_rx.recv() => {
                     return message;
                 }
 
-                // Branch 2 - Got a new connection ?
+                // Branch 2 - Got a new connection?
                 connection = self.established_rx.recv(),
                     if established_open =>
                 {
-                    // The reason of established_open is because
-                    // we don't want to pool once the channel is close
-                    // See the None section, in rust if one select branch
-                    // has if condition and if evaluate tothe true, rust
-                    // just evaulate the Future but never pool or process
-                    // evaluate means you will just have the handle
+                    // The reason for established_open is that we
+                    // don't want to poll this branch once the
+                    // channel is closed.
+                    //
+                    // If the condition is false, select! disables
+                    // this branch.
+
                     match connection {
-                        // Got some connection 
+                        // Got some connection.
                         Some(connection) => {
-                            // Ask connection manager to register it
+                            // Ask the connection manager to register it.
+                            //
+                            // Registration validates the peer and starts
+                            // reader/writer tasks. It does not await the
+                            // TCP connection attempt for another peer.
                             if let Err(error) = self
                                 .connection_manager
                                 .register_connection(connection)
@@ -127,8 +133,13 @@ where
                     }
                 }
 
-                // Or it is maintenance tick
-                // This produces tick every CONNECTION_MAINTENANCE_INTERVAL
+                // Branch 3 - Maintenance tick.
+                //
+                // This produces a tick every
+                // CONNECTION_MAINTENANCE_INTERVAL.
+                //
+                // Outbound connection attempts run in background tasks,
+                // so maintenance does not wait for TCP handshakes.
                 _ = maintenance.tick() => {
                     self.connection_manager
                         .maintain_connections(Instant::now())
@@ -139,11 +150,15 @@ where
     }
 
     /// Registers the next established inbound connection.
+    ///
+    /// Use this method when managing inbound registration explicitly.
+    /// Do not call it concurrently with receive_message(), because
+    /// both methods consume established_rx.
     pub async fn accept(
         &mut self,
     ) -> Result<(), TcpTransportError> {
-        // This is from the listener.. Listener sends events
-        // on the established_sender and here
+        // This is from the listener. The listener sends events
+        // through established_sender, and here we receive them.
         let connection = self
             .established_rx
             .recv()
@@ -156,7 +171,7 @@ where
     }
 
     /// Creates the TCP transport and starts its listener task.
-    /// The main method for this .. this return the TcpTransport
+    /// The main method for this returns the TcpTransport.
     pub async fn bind(
         local_server_id: ServerId,
         listener_address: SocketAddr,
@@ -172,12 +187,13 @@ where
 
         // The listener publishes established connections through
         // this bounded channel.
-        // Listener will use to send over this channel and the TcpConnection
-        // manager will receive the messages from this 
+        //
+        // The listener sends over this channel, and the transport
+        // receives the established connections from it.
         let (established_sender, established_rx) =
             mpsc::channel(ESTABLISHED_CONNECTION_CAPACITY);
 
-        // spawn the listener task and give this the handle of sender
+        // Spawn the listener task and give it the sender handle.
         let listener_task = listener.spawn(established_sender);
 
         // The connection manager owns established connections
@@ -196,6 +212,8 @@ where
     }
 
     /// Maintains outbound peer connections.
+    ///
+    /// Connection attempts are scheduled asynchronously by the manager.
     pub async fn maintain_connections(&mut self) {
         self.connection_manager
             .maintain_connections(Instant::now())
@@ -231,6 +249,7 @@ where
 
 impl<C> Drop for TcpTransport<C> {
     fn drop(&mut self) {
+        // Stop accepting new inbound TCP connections.
         self.listener_task.abort();
     }
 }

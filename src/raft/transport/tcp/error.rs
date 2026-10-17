@@ -1,19 +1,20 @@
 
 use std::fmt;
 
-use tracing_subscriber::fmt::FormattedFields;
-
 #[derive(Debug)]
 pub enum TcpTransportError {
     /// The TCP connection could not established
     ConnectionFailed(String),
     ConnectionClosed,
+
+    /// The TCP transport is shutting down.
+    TransportShuttingDown,
+
     InvalidFrame(String),
     InvalidHandshake(String),
     UnsupportedProtocolVersion(u16),
     Serialization(String),
     Deserialization(String),
-
     FrameTooLarge {
         size: usize, 
         max_size: usize,
@@ -106,6 +107,10 @@ impl fmt::Display for TcpTransportError {
 
             Self::Io(error) => {
                 write!(formatter, "TCP I/O error: {}", error)
+            },
+
+            Self::TransportShuttingDown => {
+                write!(formatter, "TCP transport is shutting down")
             }
         }
     }
