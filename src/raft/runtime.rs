@@ -202,6 +202,39 @@ where
         }
     }
 
+    /// Runs the node until the transport's receive channel closes.
+    pub async fn run(&mut self)
+    where
+        C: Clone,
+    {
+        use std::time::Duration;
+        use tokio::time::{interval, MissedTickBehavior};
+
+        let mut ticker = interval(Duration::from_millis(100));
+        ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    self.tick().await;
+                }
+
+                message = self.transport.receive() => {
+                    match message {
+                        Some(message) => {
+                            self.handle_message(message).await;
+                        }
+                        None => {
+                            tracing::error!(
+                                "Transport receive channel closed"
+                            );
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
     // --- helpers ----
 
     pub fn node(

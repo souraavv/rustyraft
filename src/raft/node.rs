@@ -176,6 +176,16 @@ where
             .expect("in-memory storage cannot fail");
     }
 
+    pub fn randomize_election_timeout(
+        &mut self,
+        min_timeout_ticks: u64,
+        max_timeout_ticks: u64,
+    ) {
+        self.election_timer = ElectionTimer::randomized(
+            min_timeout_ticks,
+            max_timeout_ticks,
+        );
+    }
 
     // ------------------------------
     // --------- Actions ------------

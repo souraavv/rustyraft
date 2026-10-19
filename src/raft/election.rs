@@ -11,7 +11,7 @@
 //!
 
 use std::collections::HashSet;
-
+use rand::Rng;
 use crate::raft::state::{
     LogIndex, 
     ServerId, 
@@ -212,11 +212,12 @@ pub fn should_grant_vote(
 /// 
 /// The timer is independent of wall-clock time so that 
 /// election behavior can be tested deterministically
-
 #[derive(Debug, Copy, Clone)]
 pub struct ElectionTimer {
     elapsed_ticks: u64,
     timeout_ticks: u64,
+    min_timeout_ticks: u64,
+    max_timeout_ticks: u64,
 }
 
 impl ElectionTimer {
@@ -229,22 +230,46 @@ impl ElectionTimer {
         Self {
             elapsed_ticks: 0,
             timeout_ticks,
+            min_timeout_ticks: timeout_ticks,
+            max_timeout_ticks: timeout_ticks,
+        }
+    }
+
+    pub fn randomized(
+        min_timeout_ticks: u64,
+        max_timeout_ticks: u64,
+    ) -> Self {
+        assert!(min_timeout_ticks > 0);
+        assert!(min_timeout_ticks <= max_timeout_ticks);
+
+        let timeout_ticks = rand::thread_rng()
+            .gen_range(min_timeout_ticks..=max_timeout_ticks);
+
+        Self {
+            elapsed_ticks: 0,
+            timeout_ticks,
+            min_timeout_ticks,
+            max_timeout_ticks,
         }
     }
 
     pub fn reset(&mut self) {
         self.elapsed_ticks = 0;
 
-        tracing::trace!(
+        self.timeout_ticks = rand::thread_rng()
+            .gen_range(
+                self.min_timeout_ticks..=self.max_timeout_ticks,
+            );
+
+        tracing::debug!(
             timeout_ticks = self.timeout_ticks,
             "Reset election timer"
         );
     }
 
     pub fn tick(&mut self) {
-        self.elapsed_ticks = 
-            self.elapsed_ticks.saturating_add(1);
-        
+        self.elapsed_ticks = self.elapsed_ticks.saturating_add(1);
+
         tracing::trace!(
             elapsed_ticks = self.elapsed_ticks,
             timeout_ticks = self.timeout_ticks,
@@ -256,7 +281,6 @@ impl ElectionTimer {
         self.elapsed_ticks >= self.timeout_ticks
     }
 
-    // getters
     pub fn elapsed_ticks(&self) -> u64 {
         self.elapsed_ticks
     }
@@ -264,8 +288,6 @@ impl ElectionTimer {
     pub fn timeout_ticks(&self) -> u64 {
         self.timeout_ticks
     }
-
-
 }
 
 /// Tracks the leader heartbeat interval using logical ticks

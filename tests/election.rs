@@ -180,7 +180,6 @@ fn election_timer_rejects_zero_timeout() {
     ElectionTimer::new(0);
 }
 
-
 #[test]
 fn heartbeat_timer_does_not_expire_before_interval() {
     let mut timer = HeartbeatTimer::new(3);
