@@ -25,4 +25,17 @@ target
 
 /target
 
-/data
+# Local runtime data and persisted Raft state
+/data/
+/storage/
+/raft-data/
+
+# Logs
+*.log
+
+# Environment-specific configuration
+.env
+.env.*
+
+# Keep example environment configuration
+!.env.example
