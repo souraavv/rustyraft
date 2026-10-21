@@ -2,6 +2,7 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use rustyraft::raft::ServerId;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -14,6 +15,7 @@ const HTTP_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct HttpServer {
     address: SocketAddr,
     shutdown_tx: watch::Sender<bool>,
+    leader_status_rx: watch::Receiver<Option<ServerId>>,
     handle: JoinHandle<()>,
 }
 
@@ -21,6 +23,7 @@ impl HttpServer {
     pub fn start(
         address: SocketAddr,
         listener: TcpListener,
+        leader_status_rx: watch::Receiver<Option<ServerId>>,
     ) -> Self {
         // watch is a tokio channel - for sharing the latest values;
         // true means shutdown
@@ -32,12 +35,14 @@ impl HttpServer {
                 address,
                 Some(listener),
                 shutdown_rx,
+                leader_status_rx.clone(),
             ),
         );
 
         Self {
             address,
             shutdown_tx,
+            leader_status_rx,
             handle,
         }
     }
@@ -55,6 +60,7 @@ impl HttpServer {
                 address,
                 None,
                 shutdown_rx,
+                self.leader_status_rx.clone(),
             ),
         );
     }
@@ -101,6 +107,7 @@ async fn supervise_http_server(
     address: SocketAddr,
     initial_listener: Option<TcpListener>,
     mut shutdown: watch::Receiver<bool>,
+    leader_status_rx: watch::Receiver<Option<ServerId>>,
 ) {
     let mut listener = initial_listener;
 
@@ -159,7 +166,7 @@ async fn supervise_http_server(
         // When it become true we will stop accepting new connections
         let result = axum::serve(
             listener_to_serve,
-            crate::api::create_router(),
+            crate::api::create_router(leader_status_rx.clone()),
         )
         .with_graceful_shutdown(
             wait_for_shutdown(shutdown.clone()),

@@ -6,6 +6,7 @@ mod http_server;
 use std::error::Error;
 use std::io;
 
+use rustyraft::raft::ServerId;
 use rustyraft::raft::node::RaftNode;
 use rustyraft::raft::runtime::RaftRuntime;
 use rustyraft::raft::state_machine::NoopStateMachine;
@@ -14,6 +15,7 @@ use rustyraft::raft::storage::{
 };
 use rustyraft::raft::transport::TcpTransport;
 use tokio::net::TcpListener;
+use tokio::sync::watch;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -59,18 +61,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Randomize the election timeout to reduce election collisions.
     node.randomize_election_timeout(10, 20);
 
+    let (leader_status_tx, leader_status_rx) = 
+        watch::channel::<Option<ServerId>>(None);
+    
+
     // Get Raft Runtime
     // Runtime consitute of Node, Transport and participating clusters
     let mut runtime = RaftRuntime::new(
         node,
         transport,
         config.cluster_servers,
-    );
+    ).with_leader_status_publisher(leader_status_tx);
 
     // Start HTTP server independently from the Raft runtime.
     let mut http_server = http_server::HttpServer::start(
         config.http_listen_addr,
         listener,
+        leader_status_rx.clone(),
     );
 
     // Make Raft runtime as a tokio task and spawn it.

@@ -1,17 +1,45 @@
-use axum::{routing::get, Router};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    routing::get, 
+    Json, 
+    Router,
+};
 
-async fn hello() -> &'static str {
-    "Hello from RustyRaft!"
+use rustyraft::raft::state::ServerId;
+use serde::Serialize;
+use tokio::sync::watch;
+
+#[derive(Clone)]
+pub struct ApiState {
+    leader_status_rx: watch::Receiver<Option<ServerId>>,
 }
 
-async fn status() -> &'static str {
-    "RustyRaft API is running"
+#[derive(Serialize)]
+struct LeaderResponse {
+    leader_id: Option<u64>,
+    known: bool,
 }
 
-pub fn create_router() -> Router::<()> {
-    let app = 
-        Router::new()
-            .route("/hello", get(hello))
-            .route("/status", get(status));
-    app
+async fn leader(
+    State(state): State<ApiState>
+) -> Result<Json<LeaderResponse>, StatusCode> {
+    let leader_id = *state.leader_status_rx.borrow();
+
+    Ok(Json(LeaderResponse { 
+        leader_id: leader_id.map(|id| id.value()),
+        known: leader_id.is_some(),
+     }))
+}
+
+pub fn create_router(
+    leader_status_rx: watch::Receiver<Option<ServerId>>,
+) -> Router {
+    let state = ApiState {
+        leader_status_rx,
+    };
+
+    Router::new()
+        .route("/leader", get(leader))
+        .with_state(state)
 }

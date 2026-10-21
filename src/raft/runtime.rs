@@ -23,6 +23,7 @@ use crate::raft::transport::{
 };
 
 use std::fmt::Debug;
+use tokio::sync::watch;
 
 pub struct RaftRuntime<C, St, S, T>
 where
@@ -35,6 +36,7 @@ where
     node: RaftNode<C, St, S>,
     transport: T,
     cluster_servers: Vec<ServerId>,
+    leader_status_tx: Option<watch::Sender<Option<ServerId>>>,
 }
 
 impl<C, St, S, T> RaftRuntime<C, St, S, T>
@@ -54,6 +56,22 @@ where
             node,
             transport,
             cluster_servers,
+            leader_status_tx: None,
+        }
+    }
+
+    pub fn with_leader_status_publisher(
+        mut self, 
+        sender: watch::Sender<Option<ServerId>>
+    ) -> Self {
+        self.leader_status_tx = Some(sender);
+        self.publish_leader_status();
+        self
+    }
+
+    fn publish_leader_status(&self) {
+        if let Some(sender) = &self.leader_status_tx {
+            sender.send_replace(self.node.known_leader());
         }
     }
 
@@ -75,6 +93,7 @@ where
 
         self.execute_actions(actions)
             .await;
+        self.publish_leader_status();
     }
 
     /// Executes actions produced by the Raft node.
@@ -200,6 +219,8 @@ where
                 .await;
             }
         }
+
+        self.publish_leader_status();
     }
 
     /// Runs the node until the transport's receive channel closes.

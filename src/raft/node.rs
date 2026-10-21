@@ -73,6 +73,7 @@ pub struct RaftNode<
     // My identity - id and role
     id: ServerId,
     role: Role,
+    known_leader: Option<ServerId>,
 
     // Each Raft server has some persistent state and other volatile
     // whom I voted, what was current term and logs are persitent
@@ -118,6 +119,7 @@ where
         Self {
             id,
             role: Role::Follower,
+            known_leader: None,
 
             storage,
 
@@ -352,6 +354,7 @@ where
             self.role = Follower;
             self.leader = None;
             self.election = None;
+            self.known_leader = None;
         }
 
         let grant_vote = should_grant_vote(
@@ -450,6 +453,7 @@ where
             self.role = Role::Follower;
             self.leader = None;
             self.election = None;
+            self.known_leader = None;
 
             return Vec::new();
         }
@@ -592,6 +596,7 @@ where
             self.role = Role::Follower;
             self.leader = None;
             self.election = None;
+            self.known_leader = None;
         } else if self.role != Role::Follower {
             // A valid AppendEntries from the current term establishes
             // that another server is acting as leader. A candidate or
@@ -607,6 +612,7 @@ where
             self.role = Role::Follower;
             self.leader = None;
             self.election = None;
+            self.known_leader = None;
         }
 
         // kept after the request.term < self.persistent.current_term
@@ -655,6 +661,8 @@ where
             }
         }
 
+        // A matching AppendEntries establishes the leader for this term.
+        self.known_leader = Some(request.leader_id);
         let entry_count = request.entries.len();
 
         // The previous entry matches, so the leader and follower agree
@@ -912,7 +920,7 @@ where
         // remain a candidate until it wins, loses, or learns about
         // another server with a newer term.
         self.role = Role::Candidate;
-
+        self.known_leader = None;
         // A candidate immediately votes for itself. This vote is also
         // recorded in ElectionState so it counts toward the majority.
 
@@ -942,7 +950,7 @@ where
         cluster_servers: &[ServerId],
     ) {
         self.role = Role::Leader;
-
+        self.known_leader = Some(self.id);
         self.election = None;
 
         // A newly elected leader must immediately send
@@ -1037,6 +1045,7 @@ where
         self.role = Role::Follower;
         self.leader = None;
         self.election = None;
+        self.known_leader = None;
     }
 
     /// Update the commit index
@@ -1197,6 +1206,7 @@ where
         Self {
             id,
             role: Role::Follower,
+            known_leader: None,
             storage,
             volatile: VolatileState::new(),
             state_machine,
@@ -1216,6 +1226,10 @@ where
 
     pub fn role(&self) -> Role {
         self.role
+    }
+
+    pub fn known_leader(&self) -> Option<ServerId> {
+        self.known_leader
     }
 
     pub fn current_term(&self) -> Term {
@@ -1297,7 +1311,7 @@ where
         Self {
             id,
             role: Role::Follower,
-
+            known_leader: None,
             storage,
 
             volatile: VolatileState {
