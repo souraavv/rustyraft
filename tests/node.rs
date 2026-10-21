@@ -3416,3 +3416,176 @@ fn leader_does_not_commit_without_majority() {
         LogIndex::ZERO
     );
 }
+
+#[test]
+fn new_node_has_no_known_leader() {
+    let node = new_node(ServerId::new(1));
+
+    assert_eq!(node.known_leader(), None);
+}
+
+#[test]
+fn start_election_clears_known_leader() {
+    let server_id = ServerId::new(1);
+    let leader_id = ServerId::new(2);
+    let mut node = new_node(server_id);
+
+    // Establish a known leader.
+    let request = AppendEntriesRequest::heartbeat(
+        Term::new(1),
+        leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        LogIndex::ZERO,
+    );
+
+    assert!(test_handle_append_entries(&mut node, request).success);
+    assert_eq!(node.known_leader(), Some(leader_id));
+
+    // Starting an election must clear stale leader information.
+    node.start_election();
+
+    assert_eq!(node.role(), Role::Candidate);
+    assert_eq!(node.known_leader(), None);
+}
+
+#[test]
+fn elected_leader_knows_itself_as_leader() {
+    let leader_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
+    let cluster = [leader_id, follower_id];
+    let mut node = new_node(leader_id);
+
+    node.start_election();
+
+    test_handle_request_vote_response(
+        &mut node,
+        follower_id,
+        RequestVoteResponse::granted(Term::new(1)),
+        &cluster,
+    );
+
+    assert_eq!(node.role(), Role::Leader);
+    assert_eq!(node.known_leader(), Some(leader_id));
+}
+
+#[test]
+fn accepted_append_entries_records_leader() {
+    let follower_id = ServerId::new(1);
+    let leader_id = ServerId::new(2);
+    let mut node = new_node(follower_id);
+
+    let request = AppendEntriesRequest::heartbeat(
+        Term::new(1),
+        leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        LogIndex::ZERO,
+    );
+
+    let response = test_handle_append_entries(&mut node, request);
+
+    assert!(response.success);
+    assert_eq!(node.known_leader(), Some(leader_id));
+}
+
+#[test]
+fn higher_term_vote_request_clears_known_leader() {
+    let mut node = new_node(ServerId::new(1));
+    let leader_id = ServerId::new(2);
+
+    let heartbeat = AppendEntriesRequest::heartbeat(
+        Term::new(1),
+        leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        LogIndex::ZERO,
+    );
+
+    assert!(test_handle_append_entries(&mut node, heartbeat).success);
+    assert_eq!(node.known_leader(), Some(leader_id));
+
+    let request = RequestVoteRequest::new(
+        Term::new(2),
+        ServerId::new(3),
+        LogIndex::ZERO,
+        Term::ZERO,
+    );
+
+    test_handle_request_vote(&mut node, request);
+
+    assert_eq!(node.current_term(), Term::new(2));
+    assert_eq!(node.role(), Role::Follower);
+    assert_eq!(node.known_leader(), None);
+}
+
+#[test]
+fn higher_term_vote_response_clears_known_leader() {
+    let leader_id = ServerId::new(1);
+    let other_leader_id = ServerId::new(3);
+    let voter_id = ServerId::new(2);
+    let cluster = [leader_id, voter_id, other_leader_id];
+    let mut node = new_node(leader_id);
+
+    // First establish a known leader, then start an election.
+    let heartbeat = AppendEntriesRequest::heartbeat(
+        Term::new(1),
+        other_leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        LogIndex::ZERO,
+    );
+
+    assert!(test_handle_append_entries(&mut node, heartbeat).success);
+    assert_eq!(node.known_leader(), Some(other_leader_id));
+
+    node.start_election();
+    assert_eq!(node.known_leader(), None);
+
+    test_handle_request_vote_response(
+        &mut node,
+        voter_id,
+        RequestVoteResponse::granted(Term::new(3)),
+        &cluster,
+    );
+
+    assert_eq!(node.current_term(), Term::new(3));
+    assert_eq!(node.role(), Role::Follower);
+    assert_eq!(node.known_leader(), None);
+}
+
+#[test]
+fn higher_term_append_entries_clears_stale_leader_if_rejected() {
+    let follower_id = ServerId::new(1);
+    let old_leader_id = ServerId::new(2);
+    let new_leader_id = ServerId::new(3);
+    let mut node = new_node(follower_id);
+
+    let heartbeat = AppendEntriesRequest::heartbeat(
+        Term::new(1),
+        old_leader_id,
+        LogIndex::ZERO,
+        Term::ZERO,
+        LogIndex::ZERO,
+    );
+
+    assert!(test_handle_append_entries(&mut node, heartbeat).success);
+    assert_eq!(node.known_leader(), Some(old_leader_id));
+
+    // The previous log index does not exist, so this request fails
+    // log consistency after advancing the term.
+    let request = AppendEntriesRequest::new(
+        Term::new(2),
+        new_leader_id,
+        LogIndex::new(5),
+        Term::new(1),
+        Vec::new(),
+        LogIndex::ZERO,
+    );
+
+    let response = test_handle_append_entries(&mut node, request);
+
+    assert!(!response.success);
+    assert_eq!(node.current_term(), Term::new(2));
+    assert_eq!(node.known_leader(), None);
+}

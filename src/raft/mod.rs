@@ -12,6 +12,7 @@ pub mod state_machine;
 pub mod transport;
 pub mod runtime;
 pub mod storage;
+pub mod status;
 pub use log::{LogEntry, RaftLog};
 pub use node::{RaftNode};
 
