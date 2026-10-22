@@ -69,7 +69,10 @@ impl HttpServer {
         tracing::info!("Requesting HTTP server shutdown");
 
         // sending a shutdown true
-        let _ = self.shutdown_tx.send(true);
+        // send_replace() method is more safe than send() because 
+        // even when no receiver currently exists it update the stored value
+        // unlike send() which return an error if no receiver
+        let _ = self.shutdown_tx.send_replace(true);
 
         // Wait for graceful shutdown, but don't wait indefinitely.
         match timeout(
@@ -106,7 +109,7 @@ impl HttpServer {
 async fn supervise_http_server(
     address: SocketAddr,
     initial_listener: Option<TcpListener>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
     leader_status_rx: watch::Receiver<Option<ServerId>>,
 ) {
     let mut listener = initial_listener;
@@ -230,4 +233,95 @@ async fn wait_for_shutdown(
     // The receiver is notified of the update, even if the new value is 
     // the same.
     let _ = shutdown.changed().await;
+}
+
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn shutdown_stops_server_and_releases_port() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("should bind test listener");
+
+        let address = listener
+            .local_addr()
+            .expect("should get listener address");
+
+        let (_leader_tx, leader_status_rx) =
+            watch::channel::<Option<ServerId>>(None);
+
+        let mut server =
+            HttpServer::start(address, listener, leader_status_rx);
+
+        // Wait until the HTTP server is accepting connections.
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_secs(2);
+
+        loop {
+            if let Ok(stream) = tokio::net::TcpStream::connect(address).await {
+                drop(stream);
+                break;
+            }
+
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "HTTP server did not start in time"
+            );
+
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        server.shutdown().await;
+
+        assert!(
+            server.task().is_finished(),
+            "HTTP supervisor should have stopped"
+        );
+
+        let rebound_listener = TcpListener::bind(address)
+            .await
+            .expect("port should be available after shutdown");
+
+        drop(rebound_listener);
+    }
+
+    #[tokio::test]
+    async fn shutdown_interrupts_bind_retry() {
+        // Keep the address occupied so the supervisor's bind fails.
+        let occupied_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("should bind occupied listener");
+
+        let address = occupied_listener
+            .local_addr()
+            .expect("should get listener address");
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+
+        let (_leader_tx, leader_status_rx) =
+            watch::channel::<Option<ServerId>>(None);
+
+        let supervisor = tokio::spawn(supervise_http_server(
+            address,
+            None,
+            shutdown_rx,
+            leader_status_rx,
+        ));
+
+        // Allow the supervisor to encounter the bind failure.
+        sleep(Duration::from_millis(50)).await;
+
+        shutdown_tx.send_replace(true);
+
+        timeout(Duration::from_millis(500), supervisor)
+            .await
+            .expect("supervisor should stop without waiting for retry")
+            .expect("supervisor should not panic");
+
+        drop(occupied_listener);
+    }
 }
