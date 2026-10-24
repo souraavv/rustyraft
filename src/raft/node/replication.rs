@@ -20,12 +20,37 @@ where
     S: StateMachine<C>,
     St::Error: Debug,
 {
+
+    /// Appends a client command to the leader's log.
+    ///
+    /// Only the leader accepts new commands. The command is appended
+    /// locally first; replication to followers happens separately.
+    pub fn append_entry(
+        &mut self, 
+        command: C
+    ) -> Result<Option<LogIndex>, NodeError<St::Error>> {
+        self.append_command(None, command)
+    }
+
+    /// Appends a client command together with its request ID.
+    ///
+    /// The request ID is stored in the log entry so the runtime can
+    /// associate the command with its client request later.
+    pub fn append_client_entry(
+        &mut self, 
+        request_id: String, 
+        command: C,
+    ) -> Result<Option<LogIndex>, NodeError<St::Error>> {
+        self.append_command( Some(request_id), command)
+    }
+
     /// Appends a client command to the leader's log
     ///
     /// Only the leader accept the new commands. The command is appended
     /// locally first; replicated to the followers happen separately
-    pub fn append_entry(
+    pub fn append_command(
         &mut self,
+        request_id: Option<String>,
         command: C,
     ) -> Result<Option<LogIndex>, NodeError<St::Error>> {
         if self.role != Role::Leader {
@@ -39,9 +64,15 @@ where
         }
 
         let term = self.current_term();
-        let index = self.append_log_entry(
-            LogEntry::new(term, command),
-        )?;
+        let entry = match request_id {
+            Some(request_id) => {
+                LogEntry::new_client_command(term, request_id, command)
+            },
+            None => LogEntry::new(term, command),
+        };
+
+
+        let index = self.append_log_entry(entry)?;
 
         tracing::info!(
             server_id = self.id.value(),
@@ -51,6 +82,27 @@ where
         );
 
         Ok(Some(index))
+    }
+
+    /// Finds the log index associated with a client request ID.
+    ///
+    /// This searches the local log, regardless of whether the entry
+    /// has been committed yet.
+    pub fn client_entry_index(
+        &self,
+        request_id: &str,
+    ) -> Option<LogIndex> {
+        self.storage
+            .log()
+            .iter()
+            .enumerate()
+            .find_map(|(position, entry)| {
+                if entry.request_id() == Some(request_id) {
+                    Some(LogIndex::new(position as u64 + 1))
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn follower_progress(

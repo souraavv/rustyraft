@@ -162,3 +162,34 @@ impl<C> Default for RaftLog<C> {
         Self::new()
     }
 }
+
+
+// --- unit test case ----
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_log_entry_has_no_request_id() {
+        let entry = LogEntry::new(
+            Term::new(1),
+            "ordinary-command".to_string(),
+        );
+
+        assert_eq!(entry.request_id(), None);
+    }
+
+    #[test]
+    fn client_log_entry_retains_request_id() {
+        let entry = LogEntry::new_client_command(
+            Term::new(2),
+            "request-123".to_string(),
+            "SET x=1".to_string(),
+        );
+
+        assert_eq!(entry.request_id(), Some("request-123"));
+        assert_eq!(entry.term, Term::new(2));
+        assert_eq!(entry.command, "SET x=1");
+    }
+}

@@ -236,3 +236,51 @@ fn file_storage_recovers_then_accepts_new_entry() {
         &path,
     );
 }
+
+#[test]
+fn file_storage_preserves_request_ids_across_restart() {
+    let path = test_storage_path("client-request-id");
+
+    {
+        let mut storage = FileStorage::<String>::open(&path)
+            .expect("storage should open");
+
+        storage
+            .append_log_entry(LogEntry::new(
+                Term::new(1),
+                "ordinary-command".to_string(),
+            ))
+            .expect("ordinary entry should append");
+
+        storage
+            .append_log_entry(LogEntry::new_client_command(
+                Term::new(1),
+                "request-1".to_string(),
+                "SET x=1".to_string(),
+            ))
+            .expect("client entry should append");
+    }
+
+    {
+        let storage = FileStorage::<String>::open(&path)
+            .expect("storage should recover");
+
+        let ordinary = storage
+            .log_at(LogIndex::new(1))
+            .expect("ordinary entry should load")
+            .expect("ordinary entry should exist");
+
+        assert_eq!(ordinary.request_id(), None);
+        assert_eq!(ordinary.command, "ordinary-command");
+
+        let client_entry = storage
+            .log_at(LogIndex::new(2))
+            .expect("client entry should load")
+            .expect("client entry should exist");
+
+        assert_eq!(client_entry.request_id(), Some("request-1"));
+        assert_eq!(client_entry.command, "SET x=1");
+    }
+
+    cleanup_storage(&path);
+}

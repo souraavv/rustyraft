@@ -1,4 +1,3 @@
-
 mod api;
 mod config;
 mod http_server;
@@ -6,6 +5,7 @@ mod http_server;
 use std::error::Error;
 use std::io;
 
+use rustyraft::raft::client::ClientHandle;
 use rustyraft::raft::ServerId;
 use rustyraft::raft::node::RaftNode;
 use rustyraft::raft::runtime::RaftRuntime;
@@ -61,41 +61,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Randomize the election timeout to reduce election collisions.
     node.randomize_election_timeout(10, 20);
 
-    let (leader_status_tx, leader_status_rx) = 
+    let (leader_status_tx, leader_status_rx) =
         watch::channel::<Option<ServerId>>(None);
-    
 
-    // Get Raft Runtime
-    // Runtime consitute of Node, Transport and participating clusters
+    // Create a bounded channel for client requests.
+    // The runtime owns the receiver; the HTTP layer gets the sender.
+    let (client_handle, client_requests_rx) =
+        ClientHandle::<String>::channel(128);
+
+    // Get the raft runtime handle - it owns the node and transport.
     let mut runtime = RaftRuntime::new(
         node,
         transport,
         config.cluster_servers,
-    ).with_leader_status_publisher(leader_status_tx);
+    )
+    .with_client_requests(client_requests_rx)
+    .with_leader_status_publisher(leader_status_tx);
 
     // Start HTTP server independently from the Raft runtime.
     let mut http_server = http_server::HttpServer::start(
         config.http_listen_addr,
         listener,
         leader_status_rx.clone(),
+        client_handle,
     );
 
-    // Make Raft runtime as a tokio task and spawn it.
+    // Make Raft runtime a Tokio task and spawn it.
     let mut runtime_handle = tokio::spawn(async move {
         runtime.run().await
     });
 
-    // Now we have indepedent branches, we know each is infinite loop
-    // server runs indefinitely and same as the Raft runtime
+    // Now we have independent branches; each runs indefinitely.
+    // The HTTP server and Raft runtime operate concurrently.
     loop {
         tokio::select! {
             // HTTP Server - Handle the API
             result = http_server.task() => {
                 match result {
                     Ok(()) => {
-                        // Expecatation - Server will never return, if it
-                        // return for any reason Ok() or Err(error) we will
-                        // attempt to restart the HTTP server
+                        // Expectation - server will never return.
+                        // If it returns for any reason, attempt to restart it.
                         tracing::warn!(
                             "HTTP supervisor exited unexpectedly"
                         );
