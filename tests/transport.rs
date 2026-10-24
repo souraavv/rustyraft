@@ -38,7 +38,7 @@ where
     let actions = node.handle_request_vote(
         request.candidate_id,
         request,
-    );
+    ).expect("node should handle request vote successfully");
 
     actions
         .into_iter()
@@ -64,7 +64,7 @@ where
     let actions = node.handle_append_entries(
         request.leader_id,
         request,
-    );
+    ).expect("node should handle AppendEntries successfully");
 
     actions
         .into_iter()

@@ -68,7 +68,8 @@ fn crashed_leader_restarts_with_persistent_state() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("crashed leader must restart with persist state"),
         Some(LogIndex::new(1)),
     );
 
@@ -278,7 +279,8 @@ fn crashed_follower_restarts_with_persistent_state() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("crash follower restart must start with perist storage"),
         Some(LogIndex::new(1)),
     );
 
@@ -543,7 +545,8 @@ fn restarted_follower_rejoins_replication() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("restarted follower rejoin replication"),
         Some(LogIndex::new(1)),
     );
 
@@ -576,7 +579,8 @@ fn restarted_follower_rejoins_replication() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("B".to_string()),
+            .append_entry("B".to_string())
+            .expect("restarted followed must rejoin replication"),
         Some(LogIndex::new(2)),
     );
 
@@ -683,7 +687,8 @@ fn restarted_follower_recovers_missing_entries() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("restarted follower recover missing entries"),
         Some(LogIndex::new(1)),
     );
 
@@ -716,7 +721,8 @@ fn restarted_follower_recovers_missing_entries() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("B".to_string()),
+            .append_entry("B".to_string())
+            .expect("leader should append command B"),
         Some(LogIndex::new(2)),
     );
 
@@ -724,7 +730,8 @@ fn restarted_follower_recovers_missing_entries() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("C".to_string()),
+            .append_entry("C".to_string())
+            .expect("leader should append command C"),
         Some(LogIndex::new(3)),
     );
 

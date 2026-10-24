@@ -36,7 +36,7 @@ where
     let actions = node.handle_append_entries(
         request.leader_id,
         request,
-    );
+    ).expect("Handle append entry must return success");
 
     actions
         .into_iter()
@@ -626,12 +626,14 @@ fn conflicting_follower_log_is_repaired_after_retry() {
 
     // Leader creates A and B in term 1.
     assert_eq!(
-        leader.append_entry("A".to_string()),
+        leader.append_entry("A".to_string())
+            .expect("conflicting follower log is repaired"),
         Some(LogIndex::new(1)),
     );
 
     assert_eq!(
-        leader.append_entry("B".to_string()),
+        leader.append_entry("B".to_string())
+            .expect("conflicting follower log is repaired"),
         Some(LogIndex::new(2)),
     );
 
@@ -692,7 +694,8 @@ fn conflicting_follower_log_is_repaired_after_retry() {
 
     // C is created in term 2.
     assert_eq!(
-        leader.append_entry("C".to_string()),
+        leader.append_entry("C".to_string())
+            .expect("conflicting follower log is repaired after retry"),
         Some(LogIndex::new(3)),
     );
 
@@ -1171,17 +1174,23 @@ fn stale_success_response_does_not_move_progress_backward() {
     // Create three entries so replication progress can move
     // through multiple indexes.
     assert_eq!(
-        leader.append_entry("A".to_string()),
-        Some(LogIndex::new(1)),
-    );
+            leader
+                .append_entry("A".to_string())
+                .expect("leader should append command A"),
+            Some(LogIndex::new(1)),
+        );
 
     assert_eq!(
-        leader.append_entry("B".to_string()),
+        leader
+            .append_entry("B".to_string())
+            .expect("leader should append command B"),
         Some(LogIndex::new(2)),
     );
 
     assert_eq!(
-        leader.append_entry("C".to_string()),
+        leader
+            .append_entry("C".to_string())
+            .expect("leader should append command C"),
         Some(LogIndex::new(3)),
     );
 

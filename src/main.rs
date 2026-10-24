@@ -56,7 +56,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         config.node_id,
         storage,
         NoopStateMachine,
-    );
+    )?;
 
     // Randomize the election timeout to reduce election collisions.
     node.randomize_election_timeout(10, 20);
@@ -82,14 +82,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Make Raft runtime as a tokio task and spawn it.
     let mut runtime_handle = tokio::spawn(async move {
-        runtime.run().await;
+        runtime.run().await
     });
 
     // Now we have indepedent branches, we know each is infinite loop
     // server runs indefinitely and same as the Raft runtime
     loop {
         tokio::select! {
-            // Handle the API
+            // HTTP Server - Handle the API
             result = http_server.task() => {
                 match result {
                     Ok(()) => {
@@ -112,13 +112,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 http_server.restart();
             }
 
-            // If RAFT runtime crashes then we can simply exit..
+            // ---- Raft Runtime ----
+
             result = &mut runtime_handle => {
                 let runtime_error: Box<dyn Error> = match result {
-                    Ok(()) => io::Error::new(
+                    Ok(Ok(())) => io::Error::new(
                         io::ErrorKind::Other,
                         "Raft runtime exited unexpectedly",
                     ).into(),
+
+                    Ok(Err(error)) => error.into(),
+
                     Err(error) => error.into(),
                 };
 

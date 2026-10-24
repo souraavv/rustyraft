@@ -39,7 +39,7 @@ pub fn new_node(
     RaftNode::new(
         id,
         new_test_storage(),
-    )
+    ).expect("Raft node with test storage must succeed")
 }
 
 pub fn new_node_with_state_machine<S>(
@@ -53,7 +53,7 @@ where
         id,
         new_test_storage(),
         state_machine,
-    )
+    ).expect("Raft node with storage machine must gets created")
 }
 
 pub fn restart_node(
@@ -64,7 +64,7 @@ pub fn restart_node(
         id,
         storage,
         NoopStateMachine,
-    )
+    ).expect("Restart node must succeed")
 }
 
 pub fn new_node_with_log(
@@ -100,5 +100,5 @@ pub fn new_node_with_log(
     RaftNode::new(
         id,
         storage,
-    )
+    ).expect("raft node must get create")
 }
