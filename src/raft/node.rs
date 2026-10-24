@@ -44,8 +44,64 @@ use crate::raft::storage::{
     RaftStorage,
 };
 
-use std::fmt::Debug;
+use core::fmt;
+use std::error::Error;
+use std::fmt::{Debug, Display};
 use std::marker::PhantomData;
+
+#[derive(Debug)]
+pub enum NodeError<E> {
+    Storage {
+        operation: &'static str, 
+        source: E,
+    },
+}
+
+// Human readable representation of value (not developers - for that we have
+// debug)
+// E: Display means - we can display the nodeError when the underlying
+// E also knows how to display itself
+impl<E: Display> Display for NodeError<E> {
+    fn fmt(
+        &self, 
+        formatter: &mut fmt::Formatter<'_>,
+    ) -> fmt::Result {
+        match self {
+            Self::Storage {
+                operation, 
+                source,
+            } => write!(
+                formatter, 
+                "storage operation '{}' failed: {}",
+                operation,
+                source,
+            ),
+        }
+    }
+}
+
+// Telling Rust error handling eco-system that NodeError is Error type 
+// and allowing one error to expose another error as it cause 
+// Implementing the Error make the type usable with standard error handling
+// patterns, including returning it through an error interface Box<dyn Error>
+
+impl<E> Error for NodeError<E> 
+where 
+    // 'static bound help us to prevent accepting error types that contains
+    // short-lived borrows 
+    E: Error + 'static,
+{
+    fn source(
+        &self,
+    ) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Storage {
+                source, 
+                ..
+            } => Some(source),
+        }
+    }
+}
 
 /// A single Raft server.
 ///
@@ -53,7 +109,7 @@ use std::marker::PhantomData;
 /// Protocols behaviors suchs as elections, log replications, and commitment
 /// will be implemented in a separate mod
 /// 
-/// Thinking desing out loud
+/// Thinking design out loud
 ///    - I have my own identity and role
 ///    - I have my persistent state
 ///    - I have my volatile state
@@ -74,6 +130,9 @@ pub struct RaftNode<
     id: ServerId,
     role: Role,
     known_leader: Option<ServerId>,
+
+    current_term: Term,
+    voted_for: Option<ServerId>,
 
     // Each Raft server has some persistent state and other volatile
     // whom I voted, what was current term and logs are persitent
@@ -115,11 +174,21 @@ where
         id: ServerId,
         storage: St,
         state_machine: S,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, NodeError<St::Error>> {
+        let metadata = storage
+            .load_metadata()
+            .map_err(|source| NodeError::Storage { 
+                operation: "load_metadata", 
+                source, 
+            })?;
+    
+        Ok(Self {
             id,
             role: Role::Follower,
             known_leader: None,
+
+            current_term: metadata.current_term(),
+            voted_for: metadata.voted_for(),
 
             storage,
 
@@ -136,20 +205,14 @@ where
             heartbeat_timer: HeartbeatTimer::new(5),
             initial_heartbeat_pending: false,
             _command: PhantomData,
-        }
-    }
-
-    fn persistent_metadata(&self) -> PersistentMetadata {
-        self.storage
-            .load_metadata()
-            .expect("in-memory storage cannot fail")
+        })
     }
 
     fn set_persistent_metadata(
         &mut self,
         current_term: Term,
         voted_for: Option<ServerId>,
-    ) {
+    ) -> Result<(), NodeError<St::Error>> {
         self.storage
             .save_metadata(
                 PersistentMetadata::new(
@@ -157,25 +220,40 @@ where
                     voted_for,
                 ),
             )
-            .expect("in-memory storage cannot fail");
+            .map_err(|source| NodeError::Storage {
+                operation: "save_metadata",
+                source,
+            })?;
+
+        // update memory only after persistence succeed
+        self.current_term = current_term;
+        self.voted_for = voted_for;
+
+        Ok(())
     }
 
     fn append_log_entry(
         &mut self,
         entry: LogEntry<C>,
-    ) -> LogIndex {
+    ) -> Result<LogIndex, NodeError<St::Error>> {
         self.storage
             .append_log_entry(entry)
-            .expect("in-memory storage cannot fail")
+            .map_err(|source| NodeError::Storage {
+                operation: "append_log_entry",
+                source,
+            })
     }
 
     fn truncate_log_from(
         &mut self,
         index: LogIndex,
-    ) {
+    ) -> Result<(), NodeError<St::Error>> {
         self.storage
             .truncate_log_from(index)
-            .expect("in-memory storage cannot fail");
+            .map_err(|source| NodeError::Storage {
+                operation: "truncate_log_from",
+                source,
+            })
     }
 
     pub fn randomize_election_timeout(
@@ -302,7 +380,7 @@ where
         &mut self,
         from: ServerId,
         request: RequestVoteRequest,
-    ) -> Vec<RaftAction<C>> {
+    ) -> Result<Vec<RaftAction<C>>, NodeError<St::Error>> {
         tracing::debug!(
             server_id = self.id.value(),
             candidate_id = request.candidate_id.value(),
@@ -322,14 +400,14 @@ where
                 "Rejecting RequestVote from older term"
             );
 
-            return vec![
+            return Ok(vec![
                 RaftAction::SendRequestVoteResponse {
                     target: from,
                     response: RequestVoteResponse::rejected(
                         self.current_term(),
                     ),
                 },
-            ];
+            ]);
         }
 
         // A newer term means this node has stale Raft state.
@@ -377,14 +455,14 @@ where
                 "Vote rejected"
             );
 
-            return vec![
+            return Ok(vec![
                 RaftAction::SendRequestVoteResponse {
                     target: from,
                     response: RequestVoteResponse::rejected(
                         self.current_term(),
                     ),
                 },
-            ];
+            ]);
         }
 
         // The candidate passed all voting rules. Record the vote so this
@@ -392,7 +470,7 @@ where
         self.set_persistent_metadata(
             self.current_term(),
             Some(request.candidate_id),
-        );
+        )?;
 
         // Granting a valid vote is election activity.
         // Reset the timer so that follower does not immediately
@@ -406,14 +484,14 @@ where
             "Vote granted"
         );
 
-        vec![
+        Ok(vec![
             RaftAction::SendRequestVoteResponse {
                 target: from,
                 response: RequestVoteResponse::granted(
                     self.current_term(),
                 ),
             },
-        ]
+        ])
     }
 
     /// Handles a response to a RequestVote RPC.
@@ -426,7 +504,7 @@ where
         voter_id: ServerId,
         response: RequestVoteResponse,
         cluster_servers: &[ServerId],
-    ) -> Vec<RaftAction<C>> {
+    ) -> Result<Vec<RaftAction<C>>, NodeError<St::Error>> {
         tracing::debug!(
             server_id = self.id.value(),
             response_term = response.term.value(),
@@ -448,14 +526,14 @@ where
             self.set_persistent_metadata(
                 response.term,
                 None,
-            );
+            )?;
 
             self.role = Role::Follower;
             self.leader = None;
             self.election = None;
             self.known_leader = None;
 
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Only the election belonging to our current term can affect
@@ -468,7 +546,7 @@ where
                 "Ignoring stale RequestVote response"
             );
 
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // A node that is no longer a candidate cannot use an old vote
@@ -480,7 +558,7 @@ where
                 "Ignoring vote response because node is not a candidate"
             );
 
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // A rejected vote does not change the election state. We keep
@@ -491,7 +569,7 @@ where
                 "Vote was not granted"
             );
 
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // we are using { .. } so that we can borrow the election as mut
@@ -508,7 +586,7 @@ where
                         "Received vote without an active election"
                     );
 
-                    return Vec::new();
+                    return Ok(Vec::new());
                 }
             };
 
@@ -528,7 +606,7 @@ where
             self.become_leader(cluster_servers);
         }
 
-        Vec::new()
+        Ok(Vec::new())
     }
 
     // ---------------------------------------------------------
@@ -544,7 +622,7 @@ where
         &mut self,
         from: ServerId,
         request: AppendEntriesRequest<C>,
-    ) -> Vec<RaftAction<C>> {
+    ) -> Result<Vec<RaftAction<C>>, NodeError<St::Error>> {
         tracing::debug!(
             server_id = self.id.value(),
             leader_id = request.leader_id.value(),
@@ -566,14 +644,14 @@ where
                 "Rejecting AppendEntries from older term"
             );
 
-            return vec![
+            return Ok(vec![
                 RaftAction::SendAppendEntriesResponse {
                     target: from,
                     response: AppendEntriesResponse::failure(
                         self.current_term(),
                     ),
                 },
-            ];
+            ]);
         }
 
         // A newer term means this node has stale state. Move to the
@@ -590,7 +668,7 @@ where
             self.set_persistent_metadata(
                 request.term,
                 None,
-            );
+            )?;
 
             // reset back to the follower
             self.role = Role::Follower;
@@ -650,14 +728,14 @@ where
                 // that I can proceed.. and this is where leader will start
                 // backtracking from nextIndex until it found.. and that's
                 // where recovery start..
-                return vec![
+                return Ok(vec![
                     RaftAction::SendAppendEntriesResponse {
                         target: from,
                         response: AppendEntriesResponse::failure(
                             self.current_term(),
                         ),
                     },
-                ];
+                ]);
             }
         }
 
@@ -698,8 +776,8 @@ where
                         "Truncating conflicting log entries"
                     );
 
-                    self.truncate_log_from(index);
-                    self.append_log_entry(entry);
+                    self.truncate_log_from(index)?;
+                    self.append_log_entry(entry)?;
                 }
 
                 None => {
@@ -770,7 +848,7 @@ where
             "AppendEntries accepted"
         );
 
-        vec![
+        Ok(vec![
             RaftAction::SendAppendEntriesResponse {
                 target: from,
                 response: AppendEntriesResponse::success(
@@ -778,7 +856,7 @@ where
                     replicated_index,
                 ),
             },
-        ]
+        ])
     }
 
     /// Handles an AppendEntries resopnse from a follower
@@ -790,7 +868,7 @@ where
         &mut self,
         follower_id: ServerId,
         response: AppendEntriesResponse,
-    ) -> Vec<RaftAction<C>> {
+    ) -> Result<Vec<RaftAction<C>>, NodeError<St::Error>> {
 
         if self.role != Role::Leader {
             tracing::debug!(
@@ -799,15 +877,15 @@ where
                 "Ignoring AppendEntries response because node is not leader"
             );
 
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Some else become leader
         // A response from a newer term means this leader has stale
         // state and must step down before processing the response.
         if response.term > self.current_term() {
-            self.step_down_for_newer_term(response.term);
-            return Vec::new();
+            self.step_down_for_newer_term(response.term)?;
+            return Ok(Vec::new());
         }
 
         // Stale network packets
@@ -822,7 +900,7 @@ where
                 "Ignoring stale AppendEntries response"
             );
 
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let leader = match self.leader.as_mut() {
@@ -833,7 +911,7 @@ where
                     "Leader state missing while handling response"
                 );
 
-                return Vec::new();
+                return Ok(Vec::new());
             }
         };
 
@@ -854,7 +932,7 @@ where
             );
         }
 
-        Vec::new()
+        Ok(Vec::new())
     }
 
     // -----------------------------------------------
@@ -905,7 +983,9 @@ where
     /// and create the state used to collect votes
     /// 
     /// Sending RequestVote Rpc 
-    pub fn start_election(&mut self) {
+    pub fn start_election(
+        &mut self,
+    ) -> Result<(), NodeError<St::Error>> {
 
         let new_term = self.current_term().next();
 
@@ -914,7 +994,7 @@ where
         self.set_persistent_metadata(
             new_term,
             Some(self.id),
-        );
+        )?;
 
         // Starting an election makes this node a candidate. It will
         // remain a candidate until it wins, loses, or learns about
@@ -939,6 +1019,8 @@ where
             term = new_term.value(),
             "Raft node became candidate"
         );
+
+        Ok(())
     }
 
     /// Create the leader state after winning the election
@@ -1003,7 +1085,7 @@ where
     pub fn append_entry(
         &mut self, 
         command: C,
-    ) -> Option<LogIndex> {
+    ) -> Result<Option<LogIndex>, NodeError<St::Error>> {
         if self.role != Role::Leader {
             tracing::debug!(
                 server_id = self.id.value(),
@@ -1011,13 +1093,13 @@ where
                 "Rejecting log entry because node is not leader"
             );
 
-            return None;
+            return Ok(None);
         }
 
         let term = self.current_term();
         let index = self.append_log_entry(
             LogEntry::new(term, command),
-        );
+        )?;
 
         tracing::info!(
             server_id = self.id.value(),
@@ -1026,11 +1108,14 @@ where
             "Appended command to leader log"
         );
 
-        Some(index)
+        Ok(Some(index))
     }
 
 
-    fn step_down_for_newer_term(&mut self, term: Term) {
+    fn step_down_for_newer_term(
+        &mut self, 
+        term: Term
+    ) -> Result<(), NodeError<St::Error>> {
         tracing::info!(
             server_id = self.id.value(),
             old_term = self.current_term().value(),
@@ -1041,11 +1126,14 @@ where
         self.set_persistent_metadata(
             term,
             None,
-        );
+        )?;
+
         self.role = Role::Follower;
         self.leader = None;
         self.election = None;
         self.known_leader = None;
+
+        Ok(())
     }
 
     /// Update the commit index
@@ -1160,7 +1248,7 @@ where
     pub fn tick(
         &mut self,
         cluster_servers: &[ServerId],
-    ) -> Vec<RaftAction<C>>
+    ) -> Result<Vec<RaftAction<C>>, NodeError<St::Error>>
     where
         C: Clone,
     {
@@ -1172,17 +1260,17 @@ where
             if self.heartbeat_timer.expired()
                 || self.initial_heartbeat_pending
             {
-                return self.append_entries_actions();
+                return Ok(self.append_entries_actions());
             }
 
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Followers and candidates use the election timer.
         self.election_timer.tick();
 
         if !self.election_timer.expired() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         tracing::info!(
@@ -1195,28 +1283,15 @@ where
         self.start_election();
         self.election_timer.reset();
 
-        self.request_vote_actions(cluster_servers)
+        Ok(self.request_vote_actions(cluster_servers))
     } 
 
     pub fn from_storage(
         id: ServerId,
         storage: St,
         state_machine: S,
-    ) -> Self {
-        Self {
-            id,
-            role: Role::Follower,
-            known_leader: None,
-            storage,
-            volatile: VolatileState::new(),
-            state_machine,
-            leader: None,
-            election: None,
-            election_timer: ElectionTimer::new(5),
-            heartbeat_timer: HeartbeatTimer::new(5),
-            initial_heartbeat_pending: false,
-            _command: PhantomData,
-        }
+    ) -> Result<Self, NodeError<St::Error>> {
+        Self::with_storage(id, storage, state_machine)
     }
 
     /// ---- Helpers - Getters ----
@@ -1233,15 +1308,19 @@ where
     }
 
     pub fn current_term(&self) -> Term {
-        self.persistent_metadata().current_term()
+        self.current_term
     }
 
     pub fn voted_for(&self) -> Option<ServerId> {
-        self.persistent_metadata().voted_for()
+        self.voted_for
     }
 
     pub fn log(&self) -> &RaftLog<C> {
         self.storage.log()
+    }
+
+    pub fn last_log_index(&self) -> LogIndex {
+        self.storage.log().last_index()
     }
 
     pub fn log_at(
@@ -1261,12 +1340,6 @@ where
 
     pub fn election(&self) -> Option<&ElectionState> {
         self.election.as_ref()
-    }
-
-    pub fn last_log_index(&self) -> LogIndex {
-        self.storage
-            .last_log_index()
-            .expect("in-memory storage cannot fail")
     }
 
     pub fn last_log_term(&self) -> Term {
@@ -1307,25 +1380,11 @@ where
     pub fn new(
         id: ServerId,
         storage: St,
-    ) -> Self {
-        Self {
-            id,
-            role: Role::Follower,
-            known_leader: None,
-            storage,
-
-            volatile: VolatileState {
-                commit_index: crate::raft::state::LogIndex::ZERO,
-                last_apply_index: crate::raft::state::LogIndex::ZERO,
-            },
-
-            leader: None,
-            election: None,
-            election_timer: ElectionTimer::new(5), 
-            heartbeat_timer: HeartbeatTimer::new(5), 
-            state_machine: NoopStateMachine,
-            initial_heartbeat_pending: false,
-            _command: PhantomData,
-        }
+    ) -> Result<Self, NodeError<St::Error>> {
+        Self::with_storage(
+            id, 
+            storage, 
+            NoopStateMachine
+        )
     }
 }

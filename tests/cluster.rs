@@ -921,7 +921,7 @@ fn three_node_cluster_commits_command_after_majority_replication() {
 
     assert_eq!(
         index,
-        LogIndex::new(1)
+        Some(LogIndex::new(1))
     );
 
     // The command is only on the leader at this point.
@@ -1101,7 +1101,7 @@ fn cluster_retries_dropped_append_entries() {
 
     assert_eq!(
         index,
-        LogIndex::new(1)
+        Some(LogIndex::new(1))
     );
 
     // Send the first replication attempt.
@@ -1527,7 +1527,7 @@ fn cluster_replicates_command_and_commits_to_majority() {
 
     assert_eq!(
         index,
-        LogIndex::new(1),
+        Some(LogIndex::new(1)),
     );
 
     assert_eq!(

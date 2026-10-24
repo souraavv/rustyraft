@@ -69,7 +69,8 @@ fn uncommitted_entry_is_replaced_by_new_leader() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("B".to_string()),
+            .append_entry("B".to_string())
+            .expect("uncommited entry is replaced by new leader"),
         Some(LogIndex::new(1)),
     );
 
@@ -146,7 +147,8 @@ fn uncommitted_entry_is_replaced_by_new_leader() {
         cluster
             .node_mut(server2)
             .unwrap()
-            .append_entry("C".to_string()),
+            .append_entry("C".to_string())
+            .expect("uncommited entry is replaced by new leader"),
         Some(LogIndex::new(1)),
     );
 
@@ -293,7 +295,8 @@ fn committed_entry_is_never_replaced() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("commited entry never replaced"),
         Some(LogIndex::new(1)),
     );
 
@@ -487,7 +490,8 @@ fn follower_catches_up_after_downtime() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("follower catches up after downtime"),
         Some(LogIndex::new(1)),
     );
 
@@ -495,7 +499,8 @@ fn follower_catches_up_after_downtime() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("B".to_string()),
+            .append_entry("B".to_string())
+            .expect("follower catches up after downtime"),
         Some(LogIndex::new(2)),
     );
 
@@ -631,7 +636,8 @@ fn leader_retries_replication_after_message_loss() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("leader retries replication after message loss"),
         Some(LogIndex::new(1)),
     );
 

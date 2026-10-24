@@ -136,7 +136,8 @@ fn dropped_append_entries_does_not_reach_follower() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("Dropped append entry does not reach follower"),
         Some(LogIndex::new(1)),
     );
 
@@ -234,7 +235,8 @@ fn delayed_append_entries_is_processed_after_other_messages() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("delayed append entries is processed after other msg"),
         Some(LogIndex::new(1)),
     );
 
@@ -404,7 +406,8 @@ fn lost_append_entries_can_be_sent_again_after_recovery() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("lost append entries can be sent again after recovery"),
         Some(LogIndex::new(1)),
     );
 
@@ -536,7 +539,8 @@ fn duplicate_append_entries_response_is_safe() {
         cluster
             .node_mut(server1)
             .unwrap()
-            .append_entry("A".to_string()),
+            .append_entry("A".to_string())
+            .expect("dupliate append entry must be safe"),
         Some(LogIndex::new(1)),
     );
 

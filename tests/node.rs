@@ -53,7 +53,7 @@ where
     let actions = node.handle_request_vote(
         candidate_id,
         request,
-    );
+    ).expect("handle request vote must succeed");
 
     actions
         .into_iter()
@@ -81,7 +81,7 @@ where
     let actions = node.handle_append_entries(
         leader_id,
         request,
-    );
+    ).expect("Handle append entry must succed");
 
     actions
         .into_iter()
@@ -137,7 +137,7 @@ where
     S: StateMachine<C>,
     St::Error: Debug,
 {
-    node.tick(cluster_servers)
+    node.tick(cluster_servers).expect("tick must work")
 }
 
 fn append_entries_actions<C>(
@@ -889,17 +889,20 @@ fn leader_builds_append_entries_with_log_entries() {
     assert_eq!(leader.role(), Role::Leader);
 
     assert_eq!(
-        leader.append_entry("A".to_string()),
+        leader.append_entry("A".to_string())
+            .expect("Append entry A must be present"),
         Some(LogIndex::new(1))
     );
 
     assert_eq!(
-        leader.append_entry("B".to_string()),
+        leader.append_entry("B".to_string())
+            .expect("Append entry B must be present"),
         Some(LogIndex::new(2))
     );
 
     assert_eq!(
-        leader.append_entry("C".to_string()),
+        leader.append_entry("C".to_string())
+            .expect("Append entry C must be present"),
         Some(LogIndex::new(3))
     );
 
@@ -1326,7 +1329,7 @@ fn leader_advances_commit_index_after_majority_replication() {
 
     assert_eq!(
         index,
-        LogIndex::new(1)
+        Some(LogIndex::new(1))
     );
 
     // Replicate the entry to the follower.
@@ -2274,12 +2277,14 @@ fn node_restart_preserves_persistent_state() {
 
     // Now the node is allowed to append client commands.
     assert_eq!(
-        node.append_entry("A".to_string()),
+        node.append_entry("A".to_string())
+            .expect("A must be present"),
         Some(LogIndex::new(1))
     );
 
     assert_eq!(
-        node.append_entry("B".to_string()),
+        node.append_entry("B".to_string())
+            .expect("B must be present"),
         Some(LogIndex::new(2))
     );
 
@@ -3285,7 +3290,7 @@ fn leader_commits_command_after_majority_replication() {
     assert_eq!(
         leader.append_entry(
             "SET A".to_string()
-        ),
+        ).expect("Client command is appended only to leader initially"),
         Some(LogIndex::new(1))
     );
 
@@ -3398,7 +3403,7 @@ fn leader_does_not_commit_without_majority() {
     assert_eq!(
         leader.append_entry(
             "SET B".to_string()
-        ),
+        ).expect("append a command locally"),
         Some(LogIndex::new(1))
     );
 

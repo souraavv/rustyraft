@@ -345,7 +345,7 @@ fn cluster_commits_after_majority_replication_with_dropped_follower() {
 
     assert_eq!(
         index,
-        LogIndex::new(1)
+        Some(LogIndex::new(1))
     );
 
     // Queue replication to both followers.
@@ -467,7 +467,7 @@ fn cluster_does_not_commit_without_majority() {
 
     assert_eq!(
         index,
-        LogIndex::new(1)
+        Some(LogIndex::new(1))
     );
 
     // Queue replication to both followers.

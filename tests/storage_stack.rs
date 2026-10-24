@@ -495,157 +495,95 @@ fn cached_storage_does_not_update_cache_on_durable_failure() {
 }
 
 /// Verifies RaftNode persists through the complete file storage stack.
+/// Verifies RaftNode persists through the complete file storage stack.
 #[test]
 fn raft_node_survives_file_storage_restart() {
-    let path =
-        test_storage_path(
-            "raft-node-file-restart",
-        );
+    let path = test_storage_path("raft-node-file-restart");
 
-    let server_id =
-        ServerId::new(1);
+    let server_id = ServerId::new(1);
+    let follower_id = ServerId::new(2);
 
-    let follower_id =
-        ServerId::new(2);
+    let first_storage = FileStorage::<String>::open(&path)
+        .expect("file storage should open");
 
-    let first_storage =
-        FileStorage::<String>::open(
-            &path,
-        )
-        .expect(
-            "file storage should open",
-        );
+    let first_storage = CachedStorage::new(
+        first_storage,
+        InMemoryCache::new(),
+    )
+    .expect("cached storage should initialize");
 
-    let first_storage =
-        CachedStorage::new(
-            first_storage,
-            InMemoryCache::new(),
-        )
-        .expect(
-            "cached storage should initialize",
-        );
+    let mut node = RaftNode::with_storage(
+        server_id,
+        first_storage,
+        NoopStateMachine,
+    )
+    .expect("Raft node should initialize from storage");
 
-    let mut node =
-        RaftNode::with_storage(
-            server_id,
-            first_storage,
-            NoopStateMachine,
-        );
-
-    node.start_election();
+    node.start_election()
+        .expect("node should start an election");
 
     node.handle_request_vote_response(
         follower_id,
-        RequestVoteResponse::granted(
-            Term::new(1),
-        ),
-        &[
-            server_id,
-            follower_id,
-        ],
+        RequestVoteResponse::granted(Term::new(1)),
+        &[server_id, follower_id],
+    )
+    .expect("node should handle the vote response");
+
+    assert_eq!(node.role(), Role::Leader);
+
+    assert_eq!(
+        node.append_entry(String::from("A"))
+            .expect("leader should append command A"),
+        Some(LogIndex::new(1)),
     );
 
     assert_eq!(
-        node.role(),
-        Role::Leader,
+        node.append_entry(String::from("B"))
+            .expect("leader should append command B"),
+        Some(LogIndex::new(2)),
     );
+
+    let storage = node.into_storage();
+    drop(storage);
+
+    let second_storage = FileStorage::<String>::open(&path)
+        .expect("file storage should reopen");
+
+    let second_storage = CachedStorage::new(
+        second_storage,
+        InMemoryCache::new(),
+    )
+    .expect("cached storage should recover");
+
+    let restarted = RaftNode::from_storage(
+        server_id,
+        second_storage,
+        NoopStateMachine,
+    )
+    .expect("Raft node should recover from file storage");
+
+    assert_eq!(restarted.role(), Role::Follower);
+    assert_eq!(restarted.current_term(), Term::new(1));
+    assert_eq!(restarted.voted_for(), Some(server_id));
+    assert_eq!(restarted.log().last_index(), LogIndex::new(2));
 
     assert_eq!(
-        node.append_entry(
-            String::from("A"),
-        ),
-        Some(
-            LogIndex::new(1)
-        ),
-    );
-
-    assert_eq!(
-        node.append_entry(
-            String::from("B"),
-        ),
-        Some(
-            LogIndex::new(2)
-        ),
-    );
-
-    let storage =
-        node.into_storage();
-
-    drop(
-        storage
-    );
-
-    let second_storage =
-        FileStorage::<String>::open(
-            &path,
-        )
-        .expect(
-            "file storage should reopen",
-        );
-
-    let second_storage =
-        CachedStorage::new(
-            second_storage,
-            InMemoryCache::new(),
-        )
-        .expect(
-            "cached storage should recover",
-        );
-
-    let restarted =
-        RaftNode::from_storage(
-            server_id,
-            second_storage,
-            NoopStateMachine,
-        );
-
-    assert_eq!(
-        restarted.role(),
-        Role::Follower,
-    );
-
-    assert_eq!(
-        restarted.current_term(),
-        Term::new(1),
-    );
-
-    assert_eq!(
-        restarted.voted_for(),
-        Some(server_id),
-    );
-
-    assert_eq!(
-        restarted.log().last_index(),
-        LogIndex::new(2),
+        restarted
+            .log_at(LogIndex::new(1))
+            .expect("first log entry should be readable")
+            .command
+            .clone(),
+        String::from("A"),
     );
 
     assert_eq!(
         restarted
-            .log_at(
-                LogIndex::new(1),
-            )
-            .map(
-                |entry| entry.command.clone()
-            ),
-        Some(
-            String::from("A")
-        ),
+            .log_at(LogIndex::new(2))
+            .expect("second log entry should be readable")
+            .command
+            .clone(),
+        String::from("B"),
     );
 
-    assert_eq!(
-        restarted
-            .log_at(
-                LogIndex::new(2),
-            )
-            .map(
-                |entry| entry.command.clone()
-            ),
-        Some(
-            String::from("B")
-        ),
-    );
-
-    cleanup_storage(
-        &path,
-    );
+    cleanup_storage(&path);
 }

@@ -48,7 +48,7 @@ impl TestCluster {
                     RaftNode::new(
                         server_id,
                         new_test_storage(),
-                    ),
+                    ).expect("Raft node must get created"),
                 )
             })
             .collect();
@@ -218,7 +218,7 @@ impl TestCluster {
                 server_id,
                 storage,
                 NoopStateMachine,
-            );
+            ).expect("Node must get created");
 
         self.nodes.insert(
             server_id,
@@ -286,7 +286,7 @@ impl TestCluster {
                     node.handle_request_vote(
                         from,
                         request,
-                    )
+                    ).expect("handle request vote must succeed")
                 }
 
                 RaftMessagePayload::RequestVoteResponse(
@@ -296,7 +296,7 @@ impl TestCluster {
                         from,
                         response,
                         &cluster_servers,
-                    )
+                    ).expect("handle request vote response must work")
                 }
 
                 RaftMessagePayload::AppendEntries(
@@ -305,7 +305,7 @@ impl TestCluster {
                     node.handle_append_entries(
                         from,
                         request,
-                    )
+                    ).expect("handle append entries must work")
                 }
 
                 RaftMessagePayload::AppendEntriesResponse(
@@ -314,7 +314,7 @@ impl TestCluster {
                     node.handle_append_entries_response(
                         from,
                         response,
-                    )
+                    ).expect("handle append entries response must work")
                 }
             }
         };
@@ -394,7 +394,7 @@ impl TestCluster {
 
             node.tick(
                 &server_ids,
-            )
+            ).expect("tick is expected")
         };
 
         self.execute_actions(

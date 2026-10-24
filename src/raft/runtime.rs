@@ -12,7 +12,7 @@
 //! handle_message is externally driven.
 
 use crate::raft::action::RaftAction;
-use crate::raft::node::RaftNode;
+use crate::raft::node::{NodeError, RaftNode};
 use crate::raft::state::ServerId;
 use crate::raft::state_machine::StateMachine;
 use crate::raft::storage::RaftStorage;
@@ -82,18 +82,18 @@ where
     /// The runtime is responsible only for executing the actions.
     pub async fn tick(
         &mut self,
-    )
+    ) -> Result<(), NodeError<St::Error>>
     where
         C: Clone,
     {
-        let actions =
-            self.node.tick(
-                &self.cluster_servers,
-            );
+        let actions = self.node.tick(
+            &self.cluster_servers,
+        )?;
 
-        self.execute_actions(actions)
-            .await;
+        self.execute_actions(actions).await;
         self.publish_leader_status();
+
+        Ok(())
     }
 
     /// Executes actions produced by the Raft node.
@@ -146,7 +146,7 @@ where
     pub async fn handle_message(
         &mut self,
         message: RaftMessage<C>,
-    )
+    ) -> Result<(), NodeError<St::Error>>
     where
         C: Clone,
     {
@@ -162,7 +162,7 @@ where
                         .handle_request_vote(
                             from,
                             request,
-                        );
+                        )?;
 
                 self.execute_actions(
                     actions,
@@ -179,7 +179,7 @@ where
                             from,
                             response,
                             &self.cluster_servers,
-                        );
+                        )?;
 
                 self.execute_actions(
                     actions,
@@ -195,7 +195,7 @@ where
                         .handle_append_entries(
                             from,
                             request,
-                        );
+                        )?;
 
                 self.execute_actions(
                     actions,
@@ -211,7 +211,7 @@ where
                         .handle_append_entries_response(
                             from,
                             response,
-                        );
+                        )?;
 
                 self.execute_actions(
                     actions,
@@ -221,10 +221,14 @@ where
         }
 
         self.publish_leader_status();
+        
+        Ok(())
     }
 
     /// Runs the node until the transport's receive channel closes.
-    pub async fn run(&mut self)
+    pub async fn run(
+        &mut self
+    ) -> Result<(), NodeError<St::Error>>
     where
         C: Clone,
     {
@@ -243,13 +247,13 @@ where
                 message = self.transport.receive() => {
                     match message {
                         Some(message) => {
-                            self.handle_message(message).await;
+                            self.handle_message(message).await?;
                         }
                         None => {
                             tracing::error!(
                                 "Transport receive channel closed"
                             );
-                            return;
+                            return Ok(());
                         }
                     }
                 }
