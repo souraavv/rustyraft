@@ -13,7 +13,6 @@ use rustyraft::raft::transport::{
     InMemoryTransport,
     RaftMessage,
     RaftMessagePayload,
-    Transport,
 };
 
 use super::node::{

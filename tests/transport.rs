@@ -335,7 +335,7 @@ fn transport_delivers_append_entries_to_follower() {
             Term::new(1),
         ),
         &cluster,
-    );
+    ).expect("handle vote request resopnse must work");
 
     assert_eq!(
         leader.role(),

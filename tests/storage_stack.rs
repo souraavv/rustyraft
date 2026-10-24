@@ -32,13 +32,6 @@ use rustyraft::raft::storage::{
     RaftStorage,
 };
 
-type FileTestStorage =
-    CachedStorage<
-        FileStorage<String>,
-        String,
-        InMemoryCache<String>,
-    >;
-
 #[derive(Debug)]
 struct StorageTestError;
 

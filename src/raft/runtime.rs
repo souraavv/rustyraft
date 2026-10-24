@@ -11,8 +11,9 @@
 //!
 //! handle_message is externally driven.
 
+use crate::raft::NodeError;
 use crate::raft::action::RaftAction;
-use crate::raft::node::{NodeError, RaftNode};
+use crate::raft::node::RaftNode;
 use crate::raft::state::ServerId;
 use crate::raft::state_machine::StateMachine;
 use crate::raft::storage::RaftStorage;
@@ -87,8 +88,8 @@ where
         C: Clone,
     {
         let actions = self.node.tick(
-            &self.cluster_servers,
-        )?;
+                &self.cluster_servers,
+            )?;
 
         self.execute_actions(actions).await;
         self.publish_leader_status();
@@ -241,7 +242,7 @@ where
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
-                    self.tick().await;
+                    self.tick().await?;
                 }
 
                 message = self.transport.receive() => {

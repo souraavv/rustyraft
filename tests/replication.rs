@@ -1054,7 +1054,8 @@ fn leader_ignores_older_term_append_entries_response() {
     );
 
     // Create a log entry and move to a newer term.
-    leader.append_entry("A".to_string());
+    leader.append_entry("A".to_string())
+        .expect("Expected a log entry and move to newer term");
 
     leader.start_election();
 

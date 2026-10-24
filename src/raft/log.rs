@@ -16,16 +16,39 @@ use serde::{Deserialize, Serialize};
 use crate::raft::state::{LogIndex, Term};
 
 /// Each entry has the term in which it was added + Generic Command
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry<C> {
     pub term: Term,
     pub command: C,
+    request_id: Option<String>,
 }
 
 impl<C> LogEntry<C> {
     pub fn new(term: Term, command: C) -> Self {
-        Self { term, command }
+        Self { 
+            term, 
+            command,
+            request_id: None,
+        }
     }
+
+    pub fn new_client_command(
+        term: Term,
+        request_id: String, 
+        command: C,
+    ) -> Self {
+        Self {
+            term, 
+            command,
+            request_id: Some(request_id),
+        }
+    }
+
+    /// Returns the client request ID, if this is a client command.
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
 }
 
 /// We have collection of such log entry

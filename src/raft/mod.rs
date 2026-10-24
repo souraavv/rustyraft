@@ -1,20 +1,21 @@
 //! Core Raft implementation.
-
+//! 
 pub mod action;
+pub mod client;
+pub mod commit;
 pub mod election;
 pub mod log;
 pub mod node;
 pub mod replication;
 pub mod rpc;
-pub mod state;
-pub mod commit;
-pub mod state_machine;
-pub mod transport;
 pub mod runtime;
-pub mod storage;
+pub mod state;
+pub mod state_machine;
 pub mod status;
+pub mod storage;
+pub mod transport;
+
 pub use log::{LogEntry, RaftLog};
 pub use node::{RaftNode, NodeError};
-
 pub use state::{LogIndex, Role, ServerId, Term};
 pub use election::{ElectionTimer, HeartbeatTimer};

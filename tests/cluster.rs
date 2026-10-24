@@ -223,15 +223,15 @@ fn append_entries_round_trip_uses_transport() {
 
         leader.append_entry(
             "A".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "B".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "C".to_string(),
-        );
+        ).expect("leader must append entry");
     }
 
     // Build the AppendEntries request from the leader
@@ -376,15 +376,15 @@ fn append_entries_can_be_retried_after_drop() {
 
         leader.append_entry(
             "A".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "B".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "C".to_string(),
-        );
+        ).expect("leader must append entry");
     }
 
     // First replication attempt.
@@ -543,7 +543,7 @@ fn reordered_append_entries_does_not_move_progress_backward() {
         // First entry.
         leader.append_entry(
             "A".to_string(),
-        );
+        ).expect("leader must append entry");
     }
 
     // First AppendEntries:
@@ -566,7 +566,7 @@ fn reordered_append_entries_does_not_move_progress_backward() {
         // replication response is processed.
         leader.append_entry(
             "B".to_string(),
-        );
+        ).expect("leader must append entry");
     }
 
     // Second AppendEntries:
@@ -766,11 +766,11 @@ fn duplicate_append_entries_does_not_duplicate_log_entries() {
 
         leader.append_entry(
             "A".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "B".to_string(),
-        );
+        ).expect("leader must append entry");
     }
 
     // Send the same logical AppendEntries twice.

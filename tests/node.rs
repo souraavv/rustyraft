@@ -962,9 +962,15 @@ fn leader_and_follower_complete_log_replication_round() {
     assert_eq!(leader.role(), Role::Leader);
 
     // Add commands to the leader's log.
-    leader.append_entry("A".to_string());
-    leader.append_entry("B".to_string());
-    leader.append_entry("C".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("B".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("C".to_string())
+        .expect("leader must append entry");
 
     // Build the replication request.
     let request = leader
@@ -1028,9 +1034,15 @@ fn leader_backs_up_next_index_when_follower_is_missing_index() {
 
     assert_eq!(leader.role(), Role::Leader);
 
-    leader.append_entry("A".to_string());
-    leader.append_entry("B".to_string());
-    leader.append_entry("C".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("B".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("C".to_string())
+        .expect("leader must append entry");
 
     // Follower has only entries 1 and 2.
     let setup_request = AppendEntriesRequest::new(
@@ -1147,9 +1159,15 @@ fn leader_retries_append_entries_after_failure() {
     //
     // index:  1   2   3
     // term:   1   1   1
-    leader.append_entry("A".to_string());
-    leader.append_entry("B".to_string());
-    leader.append_entry("C".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("B".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("C".to_string())
+        .expect("leader must append entry");
 
     // Follower has only entries 1 and 2.
     let setup_request = AppendEntriesRequest::new(
@@ -1379,7 +1397,9 @@ fn leader_does_not_advance_commit_index_without_majority() {
     assert_eq!(leader.role(), Role::Leader);
 
     // Append an entry in the leader's current term.
-    leader.append_entry("A".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
 
     // The leader itself has the entry, but neither follower has it.
     leader.update_commit_index();
@@ -1411,7 +1431,9 @@ fn leader_commits_entry_after_replicating_to_follower() {
     assert_eq!(leader.role(), Role::Leader);
 
     // Append a command to the leader.
-    leader.append_entry("A".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
 
     assert_eq!(
         leader.commit_index(),
@@ -1468,9 +1490,15 @@ fn follower_advances_commit_index_from_leader_commit() {
     assert_eq!(leader.role(), Role::Leader);
 
     // Leader creates three entries.
-    leader.append_entry("A".to_string());
-    leader.append_entry("B".to_string());
-    leader.append_entry("C".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("B".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("C".to_string())
+        .expect("leader must append entry");
 
     // Send all three entries and tell the follower that index 3
     // is committed.
@@ -1514,9 +1542,15 @@ fn follower_does_not_commit_past_local_log() {
 
     assert_eq!(leader.role(), Role::Leader);
 
-    leader.append_entry("A".to_string());
-    leader.append_entry("B".to_string());
-    leader.append_entry("C".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("B".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("C".to_string())
+        .expect("leader must append entry");
 
     let mut request = leader
         .build_append_entries(follower_id)
@@ -1556,9 +1590,15 @@ fn follower_commit_index_never_moves_backward() {
         &[leader_id, follower_id],
     );
 
-    leader.append_entry("A".to_string());
-    leader.append_entry("B".to_string());
-    leader.append_entry("C".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("B".to_string())
+        .expect("leader must append entry");
+    leader
+        .append_entry("C".to_string())
+        .expect("leader must append entry");
 
     let mut request = leader
         .build_append_entries(follower_id)
@@ -1610,7 +1650,8 @@ fn leader_commit_index_never_moves_backward() {
 
     assert_eq!(leader.role(), Role::Leader);
 
-    leader.append_entry("A".to_string());
+    leader.append_entry("A".to_string())
+        .expect("leader must append entry");
 
     test_handle_append_entries_response(&mut leader, 
         follower_id,
@@ -1655,8 +1696,8 @@ fn leader_does_not_commit_older_term_entry_directly() {
 
     assert_eq!(leader.role(), Role::Leader);
 
-    leader.append_entry("A".to_string());
-
+    leader.append_entry("A".to_string())
+        .expect("leader must append entry");
     // Do not replicate it yet.
     //
     // The entry is from the current term, so this setup alone
@@ -1731,8 +1772,13 @@ fn last_applied_does_not_advance_when_application_fails() {
     );
 
     // Add two commands to the leader's log.
-    leader.append_entry("A".to_string());
-    leader.append_entry("B".to_string());
+    leader
+        .append_entry("A".to_string())
+        .expect("leader must append entry");
+
+    leader
+        .append_entry("B".to_string())
+        .expect("leader must append entry");
 
     // Replicate entry A.
     let request = leader
@@ -2375,15 +2421,15 @@ fn follower_restart_continues_log_replication() {
     // Add three commands to the leader's log.
     leader.append_entry(
         "A".to_string()
-    );
+    ).expect("leader must append entry");
 
     leader.append_entry(
         "B".to_string()
-    );
+    ).expect("leader must append entry");
 
     leader.append_entry(
         "C".to_string()
-    );
+    ).expect("leader must append entry");
 
     // Replicate only the first two entries
     // before the follower crashes.
@@ -2689,15 +2735,15 @@ fn leader_retries_and_reconciles_follower_after_failure() {
     // term:   1   1   1
     leader.append_entry(
         "A".to_string()
-    );
+    ).expect("leader must append entry");
 
     leader.append_entry(
         "B".to_string()
-    );
+    ).expect("leader must append entry");
 
     leader.append_entry(
         "C".to_string()
-    );
+    ).expect("leader must append entry");
 
     // Follower has only entries 1 and 2.
     let setup_request =
