@@ -401,13 +401,14 @@ fn committed_entry_is_never_replaced() {
         Role::Leader,
     );
 
-    // The new leader must retain the committed entry.
+    // The new leader must retain the existing entry and append a
+    // current-term no-op so the old prefix can be committed safely.
     assert_eq!(
         cluster
             .node(server2)
             .unwrap()
             .last_log_index(),
-        LogIndex::new(1),
+        LogIndex::new(2),
     );
 
     assert_eq!(
@@ -420,6 +421,15 @@ fn committed_entry_is_never_replaced() {
             .unwrap()
             .command().expect("log entry should contain a command"),
         "A",
+    );
+
+    assert!(
+        cluster
+            .node(server2)
+            .unwrap()
+            .log_at(LogIndex::new(2))
+            .unwrap()
+            .is_noop(),
     );
 
     assert_eq!(
