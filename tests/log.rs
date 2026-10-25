@@ -31,7 +31,7 @@ fn get_returns_entry_at_index() {
     let entry = log.get(LogIndex::new(1)).expect("entry should exist");
 
     assert_eq!(entry.term, Term::new(1));
-    assert_eq!(entry.command().expect("entry should contain a command"), "first");
+    assert_eq!(*entry.command().expect("entry should contain a command"), "first");
 }
 
 #[test]
