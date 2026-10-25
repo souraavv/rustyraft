@@ -276,7 +276,10 @@ fn file_storage_preserves_request_ids_across_restart() {
             .expect("client entry should exist");
 
         assert_eq!(client_entry.request_id(), Some("request-1"));
-        assert_eq!(client_entry.command().expect("entry has command"), "SET x=1");
+        assert_eq!(
+            client_entry.command().expect("entry has command"),
+            "SET x=1",
+        );
     }
 
     cleanup_storage(&path);
