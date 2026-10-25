@@ -523,7 +523,7 @@ fn file_storage_persists_and_recovers_state() {
                 );
 
         assert_eq!(
-            entry.command().expect("log entry should contain a command"),
+            entry.command().expect("log entry should contain a command").clone(),
             "B".to_string(),
         );
     }
