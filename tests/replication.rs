@@ -1082,7 +1082,7 @@ fn leader_ignores_older_term_append_entries_response() {
     // change.
     let current_response = AppendEntriesResponse::success(
         Term::new(2),
-        LogIndex::new(1),
+        LogIndex::new(2),
     );
 
     test_handle_append_entries_response(&mut leader,
@@ -1096,12 +1096,12 @@ fn leader_ignores_older_term_append_entries_response() {
 
     assert_eq!(
         progress.match_index,
-        LogIndex::new(1),
+        LogIndex::new(2),
     );
 
     assert_eq!(
         progress.next_index,
-        LogIndex::new(2),
+        LogIndex::new(3),
     );
 
     // A delayed response from the previous term arrives.
@@ -1136,12 +1136,12 @@ fn leader_ignores_older_term_append_entries_response() {
 
     assert_eq!(
         progress.match_index,
-        LogIndex::new(1),
+        LogIndex::new(2),
     );
 
     assert_eq!(
         progress.next_index,
-        LogIndex::new(2),
+        LogIndex::new(3),
     );
 }
 
