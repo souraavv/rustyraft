@@ -161,7 +161,7 @@ def normalized_status(body: Any) -> Optional[str]:
     value = find_value(body, "status") if body is not None else None
     if isinstance(value, str):
         value = value.lower().replace("-", "_")
-        # Accept the historical enum spelling while still validating its meaning.
+        # Accept the historical enum spelling while validating its meaning.
         return "committed" if value == "commited" else value
     return None
 
@@ -181,7 +181,10 @@ def tail(path: Path, line_count: int = 35) -> str:
         return "(could not read log: " + str(error) + ")"
 
 
-def stop_processes(processes: Dict[int, subprocess.Popen], logs: Dict[int, Any]) -> None:
+def stop_processes(
+    processes: Dict[int, subprocess.Popen],
+    logs: Dict[int, Any],
+) -> None:
     for process in processes.values():
         if process.poll() is None:
             process.terminate()
@@ -214,7 +217,9 @@ def run_test(repo: Path) -> int:
     if build.returncode != 0:
         raise E2EFailure("cargo build failed; fix the build errors above.")
     if not binary.is_file():
-        raise E2EFailure("Build succeeded but target/debug/rustyraft was not found.")
+        raise E2EFailure(
+            "Build succeeded but target/debug/rustyraft was not found."
+        )
     say("      PASS: binary built")
 
     check_ports_available()
@@ -304,7 +309,9 @@ def run_test(repo: Path) -> int:
                     code, body if body is not None else raw
                 )
             )
-        returned_id = find_value(body, "request_id") if body is not None else None
+        returned_id = (
+            find_value(body, "request_id") if body is not None else None
+        )
         if returned_id is not None and returned_id != request_id:
             raise E2EFailure(
                 "Submission response had unexpected request_id: {!r}".format(
@@ -313,14 +320,18 @@ def run_test(repo: Path) -> int:
             )
         say("      PASS: POST /commands returned HTTP {}".format(code))
 
-        say("[5/7] Waiting for the command to become committed on the leader...")
+        say(
+            "[5/7] Waiting for the command to become committed on the leader..."
+        )
         commit_deadline = time.monotonic() + COMMIT_TIMEOUT_SECONDS
         leader_body = None
         leader_index = None
         last_status_response = None
         while time.monotonic() < commit_deadline:
             if processes[leader_id].poll() is not None:
-                raise E2EFailure("Leader process exited while waiting for commit.")
+                raise E2EFailure(
+                    "Leader process exited while waiting for commit."
+                )
             status_code, status_body, status_raw = status_snapshot(
                 leader_url, request_id
             )
@@ -328,7 +339,10 @@ def run_test(repo: Path) -> int:
                 "http_status": status_code,
                 "body": status_body if status_body is not None else status_raw,
             }
-            if status_code == 200 and normalized_status(status_body) == "committed":
+            if (
+                status_code == 200
+                and normalized_status(status_body) == "committed"
+            ):
                 leader_body = status_body
                 leader_index = normalized_log_index(status_body)
                 break
@@ -344,7 +358,10 @@ def run_test(repo: Path) -> int:
             )
         if leader_index is None:
             raise E2EFailure(
-                "Leader reported committed but response had no integer log_index: "
+                (
+                    "Leader reported committed but response had no "
+                    "integer log_index: "
+                )
                 + json.dumps(leader_body, sort_keys=True)
             )
         say("      PASS: request {} committed at log index {}".format(
@@ -359,14 +376,20 @@ def run_test(repo: Path) -> int:
             node_results = {}
             for node_id in range(1, NODE_COUNT + 1):
                 url = "http://127.0.0.1:{}".format(HTTP_PORT_BASE + node_id)
-                status_code, status_body, status_raw = status_snapshot(url, request_id)
+                status_code, status_body, status_raw = status_snapshot(
+                    url, request_id
+                )
                 state = normalized_status(status_body)
                 index = normalized_log_index(status_body)
                 node_results[node_id] = {
                     "http_status": status_code,
                     "status": state,
                     "log_index": index,
-                    "body": status_body if status_body is not None else status_raw,
+                    "body": (
+                        status_body
+                        if status_body is not None
+                        else status_raw
+                    ),
                 }
                 if not (
                     status_code == 200
@@ -393,14 +416,19 @@ def run_test(repo: Path) -> int:
                     leader_index, json.dumps(failed_nodes, sort_keys=True)
                 )
             )
-        say("      PASS: all three nodes report committed at log index {}".format(
-            leader_index
-        ))
+        say(
+            (
+                "      PASS: all three nodes report committed at "
+                "log index {}"
+            ).format(leader_index)
+        )
 
         say("[7/7] Verifying that a follower rejects writes...")
         follower_id = next(node_id for node_id in range(1, NODE_COUNT + 1)
                            if node_id != leader_id)
-        follower_url = "http://127.0.0.1:{}".format(HTTP_PORT_BASE + follower_id)
+        follower_url = "http://127.0.0.1:{}".format(
+            HTTP_PORT_BASE + follower_id
+        )
         reject_id = request_id + "-follower-write"
         reject_code, reject_body, reject_raw = request_json(
             "POST",
@@ -416,7 +444,11 @@ def run_test(repo: Path) -> int:
                     reject_body if reject_body is not None else reject_raw,
                 )
             )
-        say("      PASS: follower node {} returned HTTP 409".format(follower_id))
+        say(
+            "      PASS: follower node {} returned HTTP 409".format(
+                follower_id
+            )
+        )
 
         say("")
         say("========================================")
@@ -446,11 +478,15 @@ def run_test(repo: Path) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Build and run RustyRaft's three-node client-command E2E test."
+        description=(
+            "Build and run RustyRaft's three-node client-command E2E test."
+        )
     )
     parser.add_argument(
         "--repo",
-        help="Path to the rustyraft repository (defaults to current directory).",
+        help=(
+            "Path to the rustyraft repository (defaults to current directory)."
+        ),
     )
     args = parser.parse_args()
 
