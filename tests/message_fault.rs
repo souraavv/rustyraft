@@ -293,7 +293,7 @@ fn delayed_append_entries_is_processed_after_other_messages() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 
@@ -326,7 +326,7 @@ fn delayed_append_entries_is_processed_after_other_messages() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 
@@ -485,7 +485,7 @@ fn lost_append_entries_can_be_sent_again_after_recovery() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 }
@@ -642,7 +642,7 @@ fn duplicate_append_entries_response_is_safe() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 }

@@ -179,7 +179,7 @@ fn crashed_leader_restarts_with_persistent_state() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 
@@ -361,7 +361,7 @@ fn crashed_follower_restarts_with_persistent_state() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 }
@@ -641,7 +641,7 @@ fn restarted_follower_rejoins_replication() {
                 LogIndex::new(2),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "B",
     );
 }
@@ -783,7 +783,7 @@ fn restarted_follower_recovers_missing_entries() {
                 LogIndex::new(2),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "B",
     );
 
@@ -795,7 +795,7 @@ fn restarted_follower_recovers_missing_entries() {
                 LogIndex::new(3),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "C",
     );
 }

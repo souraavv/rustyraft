@@ -78,7 +78,7 @@ fn storage_preserves_metadata_and_log() {
         storage
             .log_at(second_index)
             .unwrap()
-            .map(|entry| entry.command),
+            .map(|entry| entry.command().expect("entry has command").clone()),
         Some(String::from("B")),
     );
 }
@@ -187,12 +187,12 @@ fn storage_returns_entries_from_index() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].term, Term::new(1));
     assert_eq!(
-        entries[0].command,
+        entries[0].command().expect("entry has command").clone(),
         String::from("B"),
     );
     assert_eq!(entries[1].term, Term::new(2));
     assert_eq!(
-        entries[1].command,
+        entries[1].command().expect("entry has command").clone(),
         String::from("C"),
     );
 }
@@ -324,7 +324,7 @@ fn storage_appends_after_log_truncation() {
         storage
             .log_at(LogIndex::new(2))
             .unwrap()
-            .map(|entry| entry.command),
+            .map(|entry| entry.command().expect("entry has command").clone()),
         Some(String::from("C")),
     );
 }
@@ -506,7 +506,7 @@ fn file_storage_persists_and_recovers_state() {
                 );
 
         assert_eq!(
-            entry.command,
+            entry.command().expect("entry has command").clone(),
             "A".to_string(),
         );
 
@@ -523,7 +523,7 @@ fn file_storage_persists_and_recovers_state() {
                 );
 
         assert_eq!(
-            entry.command,
+            entry.command().expect("entry has command").clone(),
             "B".to_string(),
         );
     }
