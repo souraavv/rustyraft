@@ -187,12 +187,12 @@ fn storage_returns_entries_from_index() {
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0].term, Term::new(1));
     assert_eq!(
-        entries[0].command().expect("log entry should contain a command"),
+        entries[0].command().expect("log entry should contain a command").clone(),
         String::from("B"),
     );
     assert_eq!(entries[1].term, Term::new(2));
     assert_eq!(
-        entries[1].command().expect("log entry should contain a command"),
+        entries[1].command().expect("log entry should contain a command").clone(),
         String::from("C"),
     );
 }
@@ -506,7 +506,7 @@ fn file_storage_persists_and_recovers_state() {
                 );
 
         assert_eq!(
-            entry.command().expect("log entry should contain a command"),
+            entry.command().expect("log entry should contain a command").clone(),
             "A".to_string(),
         );
 
