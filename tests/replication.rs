@@ -722,7 +722,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
     );
 
     assert_eq!(
-        request.entries[0].command().expect("log entry should contain a command"),
+        request.entries[0].command().expect("entry has command"),
         "C",
     );
 
@@ -810,7 +810,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
             .log()
             .get(LogIndex::new(3))
             .expect("entry 3 should exist")
-            .command().expect("log entry should contain a command"),
+            .command().expect("entry has command"),
         "X",
     );
 
@@ -900,7 +900,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
     );
 
     assert_eq!(
-        retry.entries[0].command().expect("log entry should contain a command"),
+        retry.entries[0].command().expect("entry has command"),
         "C",
     );
 
@@ -934,7 +934,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
             .log()
             .get(LogIndex::new(3))
             .expect("entry 3 should exist")
-            .command().expect("log entry should contain a command"),
+            .command().expect("entry has command"),
         "C",
     );
 
