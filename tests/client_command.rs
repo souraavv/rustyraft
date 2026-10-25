@@ -167,7 +167,7 @@ fn client_entry_retains_request_id_and_index() {
 
     let entry = node.log_at(index).expect("entry should exist");
     assert_eq!(entry.request_id(), Some("request-1"));
-    assert_eq!(entry.command, "SET x=1");
+    assert_eq!(entry.command().expect("log entry should contain a command"), "SET x=1");
     assert_eq!(node.client_entry_index("missing"), None);
 }
 
