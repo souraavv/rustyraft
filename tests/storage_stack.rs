@@ -309,9 +309,7 @@ fn cached_file_storage_survives_restart() {
                 .expect(
                     "entry should load",
                 )
-                .map(
-                    |entry| entry.command
-                ),
+                .and_then(|entry| entry.command().cloned()),
             Some(
                 String::from("A")
             ),
@@ -364,9 +362,7 @@ fn cached_file_storage_survives_restart() {
                 .expect(
                     "entry A should load",
                 )
-                .map(
-                    |entry| entry.command
-                ),
+                .and_then(|entry| entry.command().cloned()),
             Some(
                 String::from("A")
             ),
@@ -380,9 +376,7 @@ fn cached_file_storage_survives_restart() {
                 .expect(
                     "entry B should load",
                 )
-                .map(
-                    |entry| entry.command
-                ),
+                .and_then(|entry| entry.command().cloned()),
             Some(
                 String::from("B")
             ),
@@ -467,9 +461,7 @@ fn cached_storage_does_not_update_cache_on_durable_failure() {
             .expect(
                 "existing entry should remain",
             )
-            .map(
-                |entry| entry.command
-            ),
+            .and_then(|entry| entry.command().cloned()),
         Some(
             String::from("A")
         ),
@@ -564,7 +556,7 @@ fn raft_node_survives_file_storage_restart() {
         restarted
             .log_at(LogIndex::new(1))
             .expect("first log entry should be readable")
-            .command
+            .command().expect("log entry should contain a command")
             .clone(),
         String::from("A"),
     );
@@ -573,7 +565,7 @@ fn raft_node_survives_file_storage_restart() {
         restarted
             .log_at(LogIndex::new(2))
             .expect("second log entry should be readable")
-            .command
+            .command().expect("log entry should contain a command")
             .clone(),
         String::from("B"),
     );
