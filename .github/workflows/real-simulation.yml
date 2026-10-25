@@ -2,14 +2,7 @@ name: Real Simulation
 
 on:
   push:
-    branches:
-      - main
-      - feat/submit-command-via-client
-
   pull_request:
-    branches:
-      - main
-      - feat/submit-command-via-client
 
 permissions:
   contents: read
