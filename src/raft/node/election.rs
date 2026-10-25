@@ -77,18 +77,23 @@ where
         &mut self,
         cluster_servers: &[ServerId],
     ) -> Result<(), NodeError<St::Error>> {
-        // A new leader needs a current-term entry to establish commitment
-        // of any preceding entries from older terms.
-        let noop_index = self.append_log_entry(
-            LogEntry::new_noop(self.current_term()),
-        )?;
+        // After recovery, commitIndex starts at ZERO while the durable
+        // log may contain entries from earlier terms. Append a current-term
+        // no-op only when there is a prefix that still needs commitment.
+        // That lets the normal majority rule commit the prefix without
+        // requiring an extra client command after restart.
+        if self.volatile.commit_index < self.last_log_index() {
+            let noop_index = self.append_log_entry(
+                LogEntry::new_noop(self.current_term()),
+            )?;
 
-        tracing::info!(
-            server_id = self.id.value(),
-            term = self.current_term().value(),
-            log_index = noop_index.value(),
-            "Appended leader no-op entry"
-        );
+            tracing::info!(
+                server_id = self.id.value(),
+                term = self.current_term().value(),
+                log_index = noop_index.value(),
+                "Appended leader no-op entry to commit prior log prefix"
+            );
+        }
         self.role = Role::Leader;
         self.known_leader = Some(self.id);
         self.election = None;
