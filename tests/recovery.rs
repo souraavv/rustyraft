@@ -177,7 +177,7 @@ fn uncommitted_entry_is_replaced_by_new_leader() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "B",
     );
 
@@ -241,7 +241,7 @@ fn uncommitted_entry_is_replaced_by_new_leader() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "C",
     );
 }
@@ -345,7 +345,7 @@ fn committed_entry_is_never_replaced() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 
@@ -357,7 +357,7 @@ fn committed_entry_is_never_replaced() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 
@@ -418,7 +418,7 @@ fn committed_entry_is_never_replaced() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 
@@ -430,7 +430,7 @@ fn committed_entry_is_never_replaced() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 }
@@ -570,7 +570,7 @@ fn follower_catches_up_after_downtime() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 
@@ -582,7 +582,7 @@ fn follower_catches_up_after_downtime() {
                 LogIndex::new(2),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "B",
     );
 }
@@ -717,7 +717,7 @@ fn leader_retries_replication_after_message_loss() {
                 LogIndex::new(1),
             )
             .unwrap()
-            .command,
+            .command().expect("log entry should contain a command"),
         "A",
     );
 }
