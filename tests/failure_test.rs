@@ -2380,12 +2380,13 @@ fn cluster_elects_new_leader_after_leader_crash() {
         Role::Leader
     );
 
+    // The new leader appends a current-term no-op after the existing prefix.
     assert_eq!(
         cluster
             .node(follower_a)
             .expect("new leader should exist")
             .last_log_index(),
-        LogIndex::new(1)
+        LogIndex::new(2)
     );
 
     assert_eq!(
@@ -2398,6 +2399,15 @@ fn cluster_elects_new_leader_after_leader_crash() {
         "A"
     );
 
+    assert!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .log_at(LogIndex::new(2))
+            .expect("leader no-op should exist")
+            .is_noop()
+    );
+
     // The new leader appends another command.
     cluster
         .node_mut(follower_a)
@@ -2405,29 +2415,33 @@ fn cluster_elects_new_leader_after_leader_crash() {
         .append_entry("B".to_string())
         .expect("new leader should accept command");
 
-    // Replicate B to the surviving follower.
-    assert!(
-        cluster.send_append_entries(
-            follower_a,
-            follower_b
-        )
-    );
-
+    // The follower lacks the new leader's no-op, so the first request
+    // fails its prevLogIndex check. The leader backs nextIndex up and
+    // retries with the no-op followed by B.
+    assert!(cluster.send_append_entries(follower_a, follower_b));
     cluster
         .deliver_to(follower_b)
-        .expect("follower B should receive B");
-
+        .expect("follower should reject inconsistent previous index");
     cluster
         .deliver_to(follower_a)
-        .expect("new leader should receive B response");
+        .expect("leader should receive replication failure");
 
-    // The new leader should commit B.
+    assert!(cluster.send_append_entries(follower_a, follower_b));
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower should receive no-op and B");
+    cluster
+        .deliver_to(follower_a)
+        .expect("leader should receive replication success");
+
+    // B is from the current term, so majority replication commits the
+    // whole prefix (A, no-op, B).
     assert_eq!(
         cluster
             .node(follower_a)
             .expect("new leader should exist")
             .commit_index(),
-        LogIndex::new(2)
+        LogIndex::new(3)
     );
 
     assert_eq!(
@@ -2435,16 +2449,32 @@ fn cluster_elects_new_leader_after_leader_crash() {
             .node(follower_a)
             .expect("new leader should exist")
             .last_applied(),
-        LogIndex::new(2)
+        LogIndex::new(3)
     );
 
-    // The surviving follower should contain both commands.
+    // Propagate the leader's commit index to the surviving follower.
+    assert!(cluster.send_append_entries(follower_a, follower_b));
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower should learn the commit index");
+    cluster
+        .deliver_to(follower_a)
+        .expect("leader should receive commit acknowledgement");
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .commit_index(),
+        LogIndex::new(3)
+    );
+
     assert_eq!(
         cluster
             .node(follower_b)
             .expect("follower B should exist")
             .last_log_index(),
-        LogIndex::new(2)
+        LogIndex::new(3)
     );
 
     assert_eq!(
@@ -2457,11 +2487,20 @@ fn cluster_elects_new_leader_after_leader_crash() {
         "A"
     );
 
-    assert_eq!(
+    assert!(
         cluster
             .node(follower_b)
             .expect("follower B should exist")
             .log_at(LogIndex::new(2))
+            .expect("no-op should exist")
+            .is_noop()
+    );
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log_at(LogIndex::new(3))
             .expect("B should exist")
             .command().expect("log entry should contain a command"),
         "B"
