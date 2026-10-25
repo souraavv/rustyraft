@@ -2467,3 +2467,166 @@ fn cluster_elects_new_leader_after_leader_crash() {
         "B"
     );
 }
+
+#[test]
+fn new_leader_commits_existing_entries_after_full_cluster_restart() {
+    let old_leader = ServerId::new(1);
+    let new_leader = ServerId::new(2);
+    let follower = ServerId::new(3);
+    let server_ids = [old_leader, new_leader, follower];
+    let mut cluster = TestCluster::new(&server_ids);
+
+    // Elect a leader while the cluster log is empty.
+    {
+        let leader = cluster
+            .node_mut(old_leader)
+            .expect("old leader should exist");
+
+        leader.start_election().expect("election should start");
+        leader
+            .handle_request_vote_response(
+                new_leader,
+                rustyraft::raft::rpc::RequestVoteResponse::granted(
+                    Term::new(1),
+                ),
+                &server_ids,
+            )
+            .expect("vote response should be processed");
+
+        assert_eq!(leader.role(), Role::Leader);
+        leader
+            .append_entry("A".to_string())
+            .expect("command A should append");
+        leader
+            .append_entry("B".to_string())
+            .expect("command B should append");
+    }
+
+    // Replicate A and B to the other nodes and commit the old prefix.
+    for follower_id in [new_leader, follower] {
+        assert!(cluster.send_append_entries(old_leader, follower_id));
+        cluster
+            .deliver_to(follower_id)
+            .expect("follower should receive initial replication");
+        cluster
+            .deliver_to(old_leader)
+            .expect("leader should receive replication response");
+    }
+
+    // Send the now-advanced leader commit index to the first follower.
+    assert!(cluster.send_append_entries(old_leader, new_leader));
+    cluster
+        .deliver_to(new_leader)
+        .expect("follower should receive commit notification");
+    cluster
+        .deliver_to(old_leader)
+        .expect("leader should receive follower response");
+
+    for server_id in server_ids {
+        assert_eq!(
+            cluster.node(server_id).unwrap().last_log_index(),
+            LogIndex::new(2),
+        );
+    }
+    assert_eq!(
+        cluster.node(old_leader).unwrap().commit_index(),
+        LogIndex::new(2),
+    );
+
+    // Crash every process, retaining only its durable storage.
+    let old_leader_storage = cluster
+        .crash_node(old_leader)
+        .expect("old leader should crash");
+    let new_leader_storage = cluster
+        .crash_node(new_leader)
+        .expect("new leader candidate should crash");
+    let follower_storage = cluster
+        .crash_node(follower)
+        .expect("follower should crash");
+
+    cluster.restart_node(old_leader, old_leader_storage);
+    cluster.restart_node(new_leader, new_leader_storage);
+    cluster.restart_node(follower, follower_storage);
+
+    for server_id in server_ids {
+        assert_eq!(
+            cluster.node(server_id).unwrap().commit_index(),
+            LogIndex::ZERO,
+            "commitIndex is volatile and must reset on restart",
+        );
+    }
+
+    // Elect a leader with the durable A/B prefix. It must append a no-op
+    // in term 2, rather than wait for another client command to arrive.
+    cluster.start_election(new_leader);
+    cluster
+        .deliver_to(old_leader)
+        .expect("old leader should receive RequestVote");
+    cluster
+        .deliver_to(follower)
+        .expect("follower should receive RequestVote");
+    cluster
+        .deliver_to(new_leader)
+        .expect("candidate should receive vote response");
+    cluster
+        .deliver_to(new_leader)
+        .expect("candidate should receive second vote response");
+
+    assert_eq!(
+        cluster.node(new_leader).unwrap().role(),
+        Role::Leader,
+    );
+    let noop = cluster
+        .node(new_leader)
+        .unwrap()
+        .log_at(LogIndex::new(3))
+        .expect("no-op should be in the new leader log");
+    assert!(noop.is_noop());
+    assert_eq!(noop.term, Term::new(2));
+
+    // Drive heartbeats/retries until the new no-op commits and that commit
+    // index has been propagated to both followers.
+    for _ in 0..25 {
+        cluster.tick(new_leader);
+
+        while cluster.transport().has_pending() {
+            cluster
+                .deliver_next()
+                .expect("pending message should be deliverable");
+        }
+
+        if server_ids.iter().all(|server_id| {
+            cluster.node(*server_id).unwrap().commit_index()
+                >= LogIndex::new(3)
+        }) {
+            break;
+        }
+    }
+
+    for server_id in server_ids {
+        let node = cluster.node(server_id).unwrap();
+        assert_eq!(
+            node.commit_index(),
+            LogIndex::new(3),
+            "all nodes should commit the recovered log prefix",
+        );
+        assert_eq!(
+            node.last_applied(),
+            LogIndex::new(3),
+            "no-op should advance apply index without applying a command",
+        );
+        assert_eq!(
+            node.log_at(LogIndex::new(1)).unwrap()
+                .command().expect("A should be a command"),
+            "A",
+        );
+        assert_eq!(
+            node.log_at(LogIndex::new(2)).unwrap()
+                .command().expect("B should be a command"),
+            "B",
+        );
+        assert!(
+            node.log_at(LogIndex::new(3)).unwrap().is_noop(),
+        );
+    }
+}
