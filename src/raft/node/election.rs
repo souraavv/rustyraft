@@ -5,6 +5,7 @@ use crate::raft::state::{
     Term,
 };
 use crate::raft::state_machine::StateMachine;
+use crate::raft::LogEntry;
 use crate::raft::storage::RaftStorage;
 
 use std::fmt::Debug;
@@ -75,7 +76,19 @@ where
     pub(super) fn become_leader(
         &mut self,
         cluster_servers: &[ServerId],
-    ) {
+    ) -> Result<(), NodeError<St::Error>> {
+        // A new leader needs a current-term entry to establish commitment
+        // of any preceding entries from older terms.
+        let noop_index = self.append_log_entry(
+            LogEntry::new_noop(self.current_term()),
+        )?;
+
+        tracing::info!(
+            server_id = self.id.value(),
+            term = self.current_term().value(),
+            log_index = noop_index.value(),
+            "Appended leader no-op entry"
+        );
         self.role = Role::Leader;
         self.known_leader = Some(self.id);
         self.election = None;
@@ -120,6 +133,8 @@ where
                     ),
             },
         );
+
+        Ok(())
     }
 
     pub(super) fn step_down_for_newer_term(
