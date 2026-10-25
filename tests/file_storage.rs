@@ -265,7 +265,10 @@ fn file_storage_preserves_request_ids_across_restart() {
             .expect("ordinary entry should exist");
 
         assert_eq!(ordinary.request_id(), None);
-        assert_eq!(ordinary.command().expect("log entry should contain a command"), "ordinary-command");
+        assert_eq!(
+            ordinary.command().expect("entry has command"),
+            "ordinary-command",
+        );
 
         let client_entry = storage
             .log_at(LogIndex::new(2))
@@ -273,7 +276,7 @@ fn file_storage_preserves_request_ids_across_restart() {
             .expect("client entry should exist");
 
         assert_eq!(client_entry.request_id(), Some("request-1"));
-        assert_eq!(client_entry.command().expect("log entry should contain a command"), "SET x=1");
+        assert_eq!(client_entry.command().expect("entry has command"), "SET x=1");
     }
 
     cleanup_storage(&path);
