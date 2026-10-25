@@ -8,7 +8,7 @@ use crate::raft::state::{
     Term,
 };
 
-use crate::raft::LogEntry;
+use crate::raft::{LogEntry, LogEntryKind};
 
 use super::{
     DurableStorage,
@@ -121,17 +121,24 @@ impl<C> StorageCache<C> for InMemoryCache<C> {
         let mut cached_log = RaftLog::new();
 
         for log_entry in log.iter() {
-            // Copy both the command and its request ID.
-            let cached_entry = match log_entry.request_id() {
-                Some(request_id) => LogEntry::new_client_command(
+            // Preserve command metadata and protocol no-op entries.
+            let cached_entry = match &log_entry.kind {
+                LogEntryKind::Command {
+                    command,
+                    request_id: Some(request_id),
+                } => LogEntry::new_client_command(
                     log_entry.term,
-                    request_id.to_owned(),
-                    log_entry.command.clone(),
+                    request_id.clone(),
+                    command.clone(),
                 ),
-                None => LogEntry::new(
+                LogEntryKind::Command {
+                    command,
+                    request_id: None,
+                } => LogEntry::new(
                     log_entry.term,
-                    log_entry.command.clone(),
+                    command.clone(),
                 ),
+                LogEntryKind::Noop => LogEntry::new_noop(log_entry.term),
             };
 
             cached_log.append(cached_entry);
