@@ -19,7 +19,7 @@ use crate::raft::state::{
     Term,
 };
 
-use crate::raft::LogEntry;
+use crate::raft::{LogEntry, LogEntryKind};
 
 use super::{
     format,
@@ -192,20 +192,26 @@ where
     where
         C: AsRef<str>,
     {
-        let command: C = entry.command.as_ref()
-            .to_string()
-            .into();
-
-        match entry.request_id() {
-            Some(request_id) => LogEntry::new_client_command(
-                entry.term,
-                request_id.to_owned(),
+        match &entry.kind {
+            LogEntryKind::Command {
                 command,
-            ),
-            None => LogEntry::new(
-                entry.term,
+                request_id: Some(request_id),
+            } => {
+                let command: C = command.as_ref().to_string().into();
+                LogEntry::new_client_command(
+                    entry.term,
+                    request_id.clone(),
+                    command,
+                )
+            }
+            LogEntryKind::Command {
                 command,
-            ),
+                request_id: None,
+            } => {
+                let command: C = command.as_ref().to_string().into();
+                LogEntry::new(entry.term, command)
+            }
+            LogEntryKind::Noop => LogEntry::new_noop(entry.term),
         }
     }
 }
