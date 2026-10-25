@@ -99,7 +99,14 @@ where
                 "Applying committed log entry"
             );
 
-            self.state_machine.apply(&entry.command)?;
+            match entry.command() {
+                Some(command) => self.state_machine.apply(command)?,
+                None => tracing::debug!(
+                    server_id = self.id.value(),
+                    log_index = index.value(),
+                    "Skipping state-machine application for no-op"
+                ),
+            }
 
             self.volatile.last_apply_index = index;
 
