@@ -572,3 +572,60 @@ fn raft_node_survives_file_storage_restart() {
 
     cleanup_storage(&path);
 }
+
+#[test]
+fn noop_entry_survives_cached_file_storage_restart() {
+    let path = test_storage_path("cached-noop");
+
+    {
+        let file_storage = FileStorage::<String>::open(&path)
+            .expect("file storage should open");
+        let mut storage = CachedStorage::new(
+            file_storage,
+            InMemoryCache::new(),
+        )
+        .expect("cached storage should initialize");
+
+        storage
+            .append_log_entry(LogEntry::new(
+                Term::new(1),
+                "A".to_string(),
+            ))
+            .expect("command should append");
+
+        storage
+            .append_log_entry(LogEntry::new_noop(Term::new(2)))
+            .expect("no-op should append");
+    }
+
+    {
+        let file_storage = FileStorage::<String>::open(&path)
+            .expect("file storage should reopen");
+        let storage = CachedStorage::new(
+            file_storage,
+            InMemoryCache::new(),
+        )
+        .expect("cache should hydrate after restart");
+
+        assert_eq!(storage.log().last_index(), LogIndex::new(2));
+
+        let command = storage
+            .log_at(LogIndex::new(1))
+            .expect("command lookup should succeed")
+            .expect("command should exist");
+        assert_eq!(
+            command.command().expect("entry should be a command"),
+            "A",
+        );
+
+        let noop = storage
+            .log_at(LogIndex::new(2))
+            .expect("no-op lookup should succeed")
+            .expect("no-op should exist");
+        assert!(noop.is_noop());
+        assert!(noop.command().is_none());
+        assert_eq!(noop.request_id(), None);
+    }
+
+    cleanup_storage(&path);
+}
