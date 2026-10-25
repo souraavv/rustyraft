@@ -233,4 +233,15 @@ mod tests {
             "SET x=1",
         );
     }
+    
+    #[test]
+    fn noop_log_entry_has_no_command_or_request_id() {
+        let entry = LogEntry::<String>::new_noop(Term::new(3));
+
+        assert_eq!(entry.term, Term::new(3));
+        assert!(entry.is_noop());
+        assert_eq!(entry.command(), None);
+        assert_eq!(entry.request_id(), None);
+    }
+
 }
