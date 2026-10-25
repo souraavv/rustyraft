@@ -278,3 +278,89 @@ fn file_storage_preserves_request_ids_across_restart() {
 
     cleanup_storage(&path);
 }
+
+#[test]
+fn file_storage_preserves_noop_entries_across_restart() {
+    let path = test_storage_path("noop-entry");
+
+    {
+        let mut storage = FileStorage::<String>::open(&path)
+            .expect("storage should open");
+
+        storage
+            .append_log_entry(LogEntry::new(
+                Term::new(1),
+                "A".to_string(),
+            ))
+            .expect("command should append");
+
+        storage
+            .append_log_entry(LogEntry::new_noop(Term::new(2)))
+            .expect("no-op should append");
+    }
+
+    {
+        let storage = FileStorage::<String>::open(&path)
+            .expect("storage should recover");
+
+        assert_eq!(
+            storage.last_log_index().expect("last index should load"),
+            LogIndex::new(2),
+        );
+
+        let command = storage
+            .log_at(LogIndex::new(1))
+            .expect("command lookup should succeed")
+            .expect("command should exist");
+        assert_eq!(
+            command.command().expect("first entry should be a command"),
+            "A",
+        );
+
+        let noop = storage
+            .log_at(LogIndex::new(2))
+            .expect("no-op lookup should succeed")
+            .expect("no-op should exist");
+        assert!(noop.is_noop());
+        assert!(noop.command().is_none());
+        assert_eq!(noop.request_id(), None);
+    }
+
+    cleanup_storage(&path);
+}
+
+#[test]
+fn file_storage_reads_legacy_v2_log_files() {
+    let path = test_storage_path("legacy-v2");
+    fs::create_dir_all(&path)
+        .expect("storage directory should be created");
+
+    // Version 2 encoded: magic, count, term, request-ID marker, command.
+    let mut bytes = b"RUSTYRAFT-LOG-2".to_vec();
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.push(0);
+    bytes.extend_from_slice(&1_u64.to_le_bytes());
+    bytes.extend_from_slice(b"A");
+    fs::write(path.join("log"), bytes)
+        .expect("legacy log should be written");
+
+    let storage = FileStorage::<String>::open(&path)
+        .expect("legacy log format should still be readable");
+
+    assert_eq!(
+        storage.last_log_index().expect("last index should load"),
+        LogIndex::new(1),
+    );
+    assert_eq!(
+        storage
+            .log_at(LogIndex::new(1))
+            .expect("legacy command lookup should succeed")
+            .expect("legacy command should exist")
+            .command()
+            .expect("legacy entry should contain a command"),
+        "A",
+    );
+
+    cleanup_storage(&path);
+}
