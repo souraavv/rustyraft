@@ -11,12 +11,12 @@ jobs:
   real-simulation:
     name: Real Simulation (${{ matrix.nodes }} nodes)
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       max-parallel: 1
       matrix:
-        nodes: [3, 5, 7]
+        nodes: [3, 5, 7, 15]
 
     steps:
       - name: Checkout
@@ -28,6 +28,4 @@ jobs:
       - name: Run real cluster simulation
         env:
           NODE_COUNT: ${{ matrix.nodes }}
-        run: |
-          python3 tests/real-simulation/rustyraft.py \
-            --nodes "$NODE_COUNT"
+        run: python3 tests/real-simulation/rustyraft.py --nodes "$NODE_COUNT"
