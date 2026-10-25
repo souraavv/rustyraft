@@ -31,7 +31,7 @@ fn get_returns_entry_at_index() {
     let entry = log.get(LogIndex::new(1)).expect("entry should exist");
 
     assert_eq!(entry.term, Term::new(1));
-    assert_eq!(*entry.command().expect("entry should contain a command"), "first");
+    assert_eq!(*entry.command().expect("entry has command"), "first");
 }
 
 #[test]
@@ -116,7 +116,14 @@ fn iter_returns_all_entries() {
 
     log.append(LogEntry::new(Term::new(2), "second"));
 
-    let commands: Vec<&str> = log.iter().map(|entry| *entry.command().expect("entry should contain a command")).collect();
+    let commands: Vec<&str> = log
+        .iter()
+        .map(|entry| {
+            *entry
+                .command()
+                .expect("entry has command")
+        })
+        .collect();
 
     assert_eq!(commands, vec!["first", "second"]);
 }

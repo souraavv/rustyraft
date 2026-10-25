@@ -923,17 +923,17 @@ fn leader_builds_append_entries_with_log_entries() {
     assert_eq!(request.entries.len(), 3);
 
     assert_eq!(
-        request.entries[0].command().expect("log entry should contain a command"),
+        request.entries[0].command().expect("entry has command"),
         "A"
     );
 
     assert_eq!(
-        request.entries[1].command().expect("log entry should contain a command"),
+        request.entries[1].command().expect("entry has command"),
         "B"
     );
 
     assert_eq!(
-        request.entries[2].command().expect("log entry should contain a command"),
+        request.entries[2].command().expect("entry has command"),
         "C"
     );
 }
@@ -2534,7 +2534,7 @@ fn follower_restart_continues_log_replication() {
     );
 
     assert_eq!(
-        request.entries[0].command().expect("log entry should contain a command"),
+        request.entries[0].command().expect("entry has command"),
         "C"
     );
 
@@ -2865,7 +2865,7 @@ fn leader_retries_and_reconciles_follower_after_failure() {
     );
 
     assert_eq!(
-        request.entries[0].command().expect("log entry should contain a command"),
+        request.entries[0].command().expect("entry has command"),
         "C"
     );
 
@@ -3363,7 +3363,7 @@ fn leader_commits_command_after_majority_replication() {
     );
 
     assert_eq!(
-        request.entries[0].command().expect("log entry should contain a command"),
+        request.entries[0].command().expect("entry has command"),
         "SET A"
     );
 

@@ -2050,7 +2050,7 @@ fn isolated_leader_loses_authority_and_log_converges() {
                 LogIndex::new(1),
             )
             .map(
-                |entry| entry.command().expect("log entry should contain a command").clone()
+                |entry| entry.command().expect("entry has command").clone()
             ),
         Some(
             "Y".to_string()
@@ -2223,7 +2223,7 @@ fn cluster_restarts_crashed_follower_and_catches_up() {
             .expect("follower A should catch up")
             .log_at(LogIndex::new(1))
             .expect("A should exist")
-            .command().expect("log entry should contain a command"),
+            .command().expect("entry has command"),
         "A"
     );
 
@@ -2233,7 +2233,7 @@ fn cluster_restarts_crashed_follower_and_catches_up() {
             .expect("follower A should catch up")
             .log_at(LogIndex::new(2))
             .expect("B should exist")
-            .command().expect("log entry should contain a command"),
+            .command().expect("entry has command"),
         "B"
     );
 
@@ -2395,7 +2395,7 @@ fn cluster_elects_new_leader_after_leader_crash() {
             .expect("new leader should exist")
             .log_at(LogIndex::new(1))
             .expect("committed entry should exist")
-            .command().expect("log entry should contain a command"),
+            .command().expect("entry has command"),
         "A"
     );
 
@@ -2483,7 +2483,7 @@ fn cluster_elects_new_leader_after_leader_crash() {
             .expect("follower B should exist")
             .log_at(LogIndex::new(1))
             .expect("A should exist")
-            .command().expect("log entry should contain a command"),
+            .command().expect("entry has command"),
         "A"
     );
 
@@ -2502,7 +2502,7 @@ fn cluster_elects_new_leader_after_leader_crash() {
             .expect("follower B should exist")
             .log_at(LogIndex::new(3))
             .expect("B should exist")
-            .command().expect("log entry should contain a command"),
+            .command().expect("entry has command"),
         "B"
     );
 }
