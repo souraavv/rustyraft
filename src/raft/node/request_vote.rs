@@ -256,7 +256,7 @@ where
         };
 
         if has_majority {
-            self.become_leader(cluster_servers);
+            self.become_leader(cluster_servers)?;
         }
 
         Ok(Vec::new())
