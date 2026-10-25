@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./misc/image.png" alt="Rusty Raft" width="400">
+  <img src="./misc/logo.png" alt="Rusty Raft" width="400">
 </p>
 
 - [RustyRaft](#rustyraft)

@@ -722,7 +722,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
     );
 
     assert_eq!(
-        request.entries[0].command,
+        request.entries[0].command().expect("entry has command"),
         "C",
     );
 
@@ -810,7 +810,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
             .log()
             .get(LogIndex::new(3))
             .expect("entry 3 should exist")
-            .command,
+            .command().expect("entry has command"),
         "X",
     );
 
@@ -900,7 +900,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
     );
 
     assert_eq!(
-        retry.entries[0].command,
+        retry.entries[0].command().expect("entry has command"),
         "C",
     );
 
@@ -934,7 +934,7 @@ fn conflicting_follower_log_is_repaired_after_retry() {
             .log()
             .get(LogIndex::new(3))
             .expect("entry 3 should exist")
-            .command,
+            .command().expect("entry has command"),
         "C",
     );
 
@@ -1054,7 +1054,8 @@ fn leader_ignores_older_term_append_entries_response() {
     );
 
     // Create a log entry and move to a newer term.
-    leader.append_entry("A".to_string());
+    leader.append_entry("A".to_string())
+        .expect("Expected a log entry and move to newer term");
 
     leader.start_election();
 
@@ -1081,7 +1082,7 @@ fn leader_ignores_older_term_append_entries_response() {
     // change.
     let current_response = AppendEntriesResponse::success(
         Term::new(2),
-        LogIndex::new(1),
+        LogIndex::new(2),
     );
 
     test_handle_append_entries_response(&mut leader,
@@ -1095,12 +1096,12 @@ fn leader_ignores_older_term_append_entries_response() {
 
     assert_eq!(
         progress.match_index,
-        LogIndex::new(1),
+        LogIndex::new(2),
     );
 
     assert_eq!(
         progress.next_index,
-        LogIndex::new(2),
+        LogIndex::new(3),
     );
 
     // A delayed response from the previous term arrives.
@@ -1135,12 +1136,12 @@ fn leader_ignores_older_term_append_entries_response() {
 
     assert_eq!(
         progress.match_index,
-        LogIndex::new(1),
+        LogIndex::new(2),
     );
 
     assert_eq!(
         progress.next_index,
-        LogIndex::new(2),
+        LogIndex::new(3),
     );
 }
 

@@ -223,15 +223,15 @@ fn append_entries_round_trip_uses_transport() {
 
         leader.append_entry(
             "A".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "B".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "C".to_string(),
-        );
+        ).expect("leader must append entry");
     }
 
     // Build the AppendEntries request from the leader
@@ -376,15 +376,15 @@ fn append_entries_can_be_retried_after_drop() {
 
         leader.append_entry(
             "A".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "B".to_string(),
-        );
+        ).expect("leader must append entry");
 
         leader.append_entry(
             "C".to_string(),
-        );
+        ).expect("leader must append entry");
     }
 
     // First replication attempt.
@@ -543,7 +543,7 @@ fn reordered_append_entries_does_not_move_progress_backward() {
         // First entry.
         leader.append_entry(
             "A".to_string(),
-        );
+        ).expect("leader must append entry");
     }
 
     // First AppendEntries:
@@ -566,7 +566,7 @@ fn reordered_append_entries_does_not_move_progress_backward() {
         // replication response is processed.
         leader.append_entry(
             "B".to_string(),
-        );
+        ).expect("Leader must append entry");
     }
 
     // Second AppendEntries:
@@ -766,11 +766,11 @@ fn duplicate_append_entries_does_not_duplicate_log_entries() {
 
         leader.append_entry(
             "A".to_string(),
-        );
+        ).expect("Expect leader to append the entry");
 
         leader.append_entry(
             "B".to_string(),
-        );
+        ).expect("Expecte leader to append the entry");
     }
 
     // Send the same logical AppendEntries twice.
@@ -2050,7 +2050,7 @@ fn isolated_leader_loses_authority_and_log_converges() {
                 LogIndex::new(1),
             )
             .map(
-                |entry| entry.command.clone()
+                |entry| entry.command().expect("entry has command").clone()
             ),
         Some(
             "Y".to_string()
@@ -2223,7 +2223,7 @@ fn cluster_restarts_crashed_follower_and_catches_up() {
             .expect("follower A should catch up")
             .log_at(LogIndex::new(1))
             .expect("A should exist")
-            .command,
+            .command().expect("entry has command"),
         "A"
     );
 
@@ -2233,7 +2233,7 @@ fn cluster_restarts_crashed_follower_and_catches_up() {
             .expect("follower A should catch up")
             .log_at(LogIndex::new(2))
             .expect("B should exist")
-            .command,
+            .command().expect("entry has command"),
         "B"
     );
 
@@ -2380,12 +2380,13 @@ fn cluster_elects_new_leader_after_leader_crash() {
         Role::Leader
     );
 
+    // The new leader appends a current-term no-op after the existing prefix.
     assert_eq!(
         cluster
             .node(follower_a)
             .expect("new leader should exist")
             .last_log_index(),
-        LogIndex::new(1)
+        LogIndex::new(2)
     );
 
     assert_eq!(
@@ -2394,8 +2395,17 @@ fn cluster_elects_new_leader_after_leader_crash() {
             .expect("new leader should exist")
             .log_at(LogIndex::new(1))
             .expect("committed entry should exist")
-            .command,
+            .command().expect("entry has command"),
         "A"
+    );
+
+    assert!(
+        cluster
+            .node(follower_a)
+            .expect("new leader should exist")
+            .log_at(LogIndex::new(2))
+            .expect("leader no-op should exist")
+            .is_noop()
     );
 
     // The new leader appends another command.
@@ -2405,29 +2415,33 @@ fn cluster_elects_new_leader_after_leader_crash() {
         .append_entry("B".to_string())
         .expect("new leader should accept command");
 
-    // Replicate B to the surviving follower.
-    assert!(
-        cluster.send_append_entries(
-            follower_a,
-            follower_b
-        )
-    );
-
+    // The follower lacks the new leader's no-op, so the first request
+    // fails its prevLogIndex check. The leader backs nextIndex up and
+    // retries with the no-op followed by B.
+    assert!(cluster.send_append_entries(follower_a, follower_b));
     cluster
         .deliver_to(follower_b)
-        .expect("follower B should receive B");
-
+        .expect("follower should reject inconsistent previous index");
     cluster
         .deliver_to(follower_a)
-        .expect("new leader should receive B response");
+        .expect("leader should receive replication failure");
 
-    // The new leader should commit B.
+    assert!(cluster.send_append_entries(follower_a, follower_b));
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower should receive no-op and B");
+    cluster
+        .deliver_to(follower_a)
+        .expect("leader should receive replication success");
+
+    // B is from the current term, so majority replication commits the
+    // whole prefix (A, no-op, B).
     assert_eq!(
         cluster
             .node(follower_a)
             .expect("new leader should exist")
             .commit_index(),
-        LogIndex::new(2)
+        LogIndex::new(3)
     );
 
     assert_eq!(
@@ -2435,16 +2449,32 @@ fn cluster_elects_new_leader_after_leader_crash() {
             .node(follower_a)
             .expect("new leader should exist")
             .last_applied(),
-        LogIndex::new(2)
+        LogIndex::new(3)
     );
 
-    // The surviving follower should contain both commands.
+    // Propagate the leader's commit index to the surviving follower.
+    assert!(cluster.send_append_entries(follower_a, follower_b));
+    cluster
+        .deliver_to(follower_b)
+        .expect("follower should learn the commit index");
+    cluster
+        .deliver_to(follower_a)
+        .expect("leader should receive commit acknowledgement");
+
+    assert_eq!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .commit_index(),
+        LogIndex::new(3)
+    );
+
     assert_eq!(
         cluster
             .node(follower_b)
             .expect("follower B should exist")
             .last_log_index(),
-        LogIndex::new(2)
+        LogIndex::new(3)
     );
 
     assert_eq!(
@@ -2453,17 +2483,26 @@ fn cluster_elects_new_leader_after_leader_crash() {
             .expect("follower B should exist")
             .log_at(LogIndex::new(1))
             .expect("A should exist")
-            .command,
+            .command().expect("entry has command"),
         "A"
+    );
+
+    assert!(
+        cluster
+            .node(follower_b)
+            .expect("follower B should exist")
+            .log_at(LogIndex::new(2))
+            .expect("no-op should exist")
+            .is_noop()
     );
 
     assert_eq!(
         cluster
             .node(follower_b)
             .expect("follower B should exist")
-            .log_at(LogIndex::new(2))
+            .log_at(LogIndex::new(3))
             .expect("B should exist")
-            .command,
+            .command().expect("entry has command"),
         "B"
     );
 }

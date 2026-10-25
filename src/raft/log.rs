@@ -15,16 +15,77 @@ use serde::{Deserialize, Serialize};
 
 use crate::raft::state::{LogIndex, Term};
 
-/// Each entry has the term in which it was added + Generic Command
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Identifies what a log entry represents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LogEntryKind<C> {
+    Command {
+        command: C,
+        request_id: Option<String>,
+    },
+    Noop,
+}
+
+/// Each entry has the term in which it was added and its kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry<C> {
     pub term: Term,
-    pub command: C,
+    pub kind: LogEntryKind<C>,
 }
 
 impl<C> LogEntry<C> {
     pub fn new(term: Term, command: C) -> Self {
-        Self { term, command }
+        Self {
+            term,
+            kind: LogEntryKind::Command {
+                command,
+                request_id: None,
+            },
+        }
+    }
+
+    pub fn new_client_command(
+        term: Term,
+        request_id: String,
+        command: C,
+    ) -> Self {
+        Self {
+            term,
+            kind: LogEntryKind::Command {
+                command,
+                request_id: Some(request_id),
+            },
+        }
+    }
+
+    /// Creates a protocol no-op that advances the log without applying
+    /// an application command.
+    pub fn new_noop(term: Term) -> Self {
+        Self {
+            term,
+            kind: LogEntryKind::Noop,
+        }
+    }
+
+    /// Returns the application command, or None for a no-op entry.
+    pub fn command(&self) -> Option<&C> {
+        match &self.kind {
+            LogEntryKind::Command { command, .. } => Some(command),
+            LogEntryKind::Noop => None,
+        }
+    }
+
+    /// Returns the client request ID, if this is a client command.
+    pub fn request_id(&self) -> Option<&str> {
+        match &self.kind {
+            LogEntryKind::Command { request_id, .. } => {
+                request_id.as_deref()
+            }
+            LogEntryKind::Noop => None,
+        }
+    }
+
+    pub fn is_noop(&self) -> bool {
+        matches!(&self.kind, LogEntryKind::Noop)
     }
 }
 
@@ -138,4 +199,49 @@ impl<C> Default for RaftLog<C> {
     fn default() -> Self {
         Self::new()
     }
+}
+
+
+// --- unit test case ----
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ordinary_log_entry_has_no_request_id() {
+        let entry = LogEntry::new(
+            Term::new(1),
+            "ordinary-command".to_string(),
+        );
+
+        assert_eq!(entry.request_id(), None);
+    }
+
+    #[test]
+    fn client_log_entry_retains_request_id() {
+        let entry = LogEntry::new_client_command(
+            Term::new(2),
+            "request-123".to_string(),
+            "SET x=1".to_string(),
+        );
+
+        assert_eq!(entry.request_id(), Some("request-123"));
+        assert_eq!(entry.term, Term::new(2));
+        assert_eq!(
+            entry.command().expect("client entry has a command"),
+            "SET x=1",
+        );
+    }
+    
+    #[test]
+    fn noop_log_entry_has_no_command_or_request_id() {
+        let entry = LogEntry::<String>::new_noop(Term::new(3));
+
+        assert_eq!(entry.term, Term::new(3));
+        assert!(entry.is_noop());
+        assert_eq!(entry.command(), None);
+        assert_eq!(entry.request_id(), None);
+    }
+
 }
