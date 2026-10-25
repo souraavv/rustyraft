@@ -15,40 +15,78 @@ use serde::{Deserialize, Serialize};
 
 use crate::raft::state::{LogIndex, Term};
 
-/// Each entry has the term in which it was added + Generic Command
+/// Identifies what a log entry represents.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LogEntryKind<C> {
+    Command {
+        command: C,
+        request_id: Option<String>,
+    },
+    Noop,
+}
+
+/// Each entry has the term in which it was added and its kind.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry<C> {
     pub term: Term,
-    pub command: C,
-    request_id: Option<String>,
+    pub kind: LogEntryKind<C>,
 }
 
 impl<C> LogEntry<C> {
     pub fn new(term: Term, command: C) -> Self {
-        Self { 
-            term, 
-            command,
-            request_id: None,
+        Self {
+            term,
+            kind: LogEntryKind::Command {
+                command,
+                request_id: None,
+            },
         }
     }
 
     pub fn new_client_command(
         term: Term,
-        request_id: String, 
+        request_id: String,
         command: C,
     ) -> Self {
         Self {
-            term, 
-            command,
-            request_id: Some(request_id),
+            term,
+            kind: LogEntryKind::Command {
+                command,
+                request_id: Some(request_id),
+            },
+        }
+    }
+
+    /// Creates a protocol no-op that advances the log without applying
+    /// an application command.
+    pub fn new_noop(term: Term) -> Self {
+        Self {
+            term,
+            kind: LogEntryKind::Noop,
+        }
+    }
+
+    /// Returns the application command, or None for a no-op entry.
+    pub fn command(&self) -> Option<&C> {
+        match &self.kind {
+            LogEntryKind::Command { command, .. } => Some(command),
+            LogEntryKind::Noop => None,
         }
     }
 
     /// Returns the client request ID, if this is a client command.
     pub fn request_id(&self) -> Option<&str> {
-        self.request_id.as_deref()
+        match &self.kind {
+            LogEntryKind::Command { request_id, .. } => {
+                request_id.as_deref()
+            }
+            LogEntryKind::Noop => None,
+        }
     }
 
+    pub fn is_noop(&self) -> bool {
+        matches!(&self.kind, LogEntryKind::Noop)
+    }
 }
 
 /// We have collection of such log entry
@@ -190,6 +228,9 @@ mod tests {
 
         assert_eq!(entry.request_id(), Some("request-123"));
         assert_eq!(entry.term, Term::new(2));
-        assert_eq!(entry.command, "SET x=1");
+        assert_eq!(
+            entry.command().expect("client entry has a command"),
+            "SET x=1",
+        );
     }
 }
