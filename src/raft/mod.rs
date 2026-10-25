@@ -15,7 +15,7 @@ pub mod status;
 pub mod storage;
 pub mod transport;
 
-pub use log::{LogEntry, RaftLog};
+pub use log::{LogEntry, LogEntryKind, RaftLog};
 pub use node::{RaftNode, NodeError};
 pub use state::{LogIndex, Role, ServerId, Term};
 pub use election::{ElectionTimer, HeartbeatTimer};
