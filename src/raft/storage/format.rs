@@ -12,12 +12,13 @@ use crate::raft::state::{
     Term,
 };
 
-use crate::raft::LogEntry;
+use crate::raft::{LogEntry, LogEntryKind};
 
 use super::PersistentMetadata;
 
 const METADATA_MAGIC: &[u8] = b"RUSTYRAFT-META-1";
-const LOG_MAGIC: &[u8] = b"RUSTYRAFT-LOG-2";
+const LOG_MAGIC_V2: &[u8] = b"RUSTYRAFT-LOG-2";
+const LOG_MAGIC_V3: &[u8] = b"RUSTYRAFT-LOG-3";
 
 pub(super) fn write_metadata<W: Write>(
     writer: &mut W,
@@ -79,30 +80,26 @@ where
     C: AsRef<str>,
     W: Write,
 {
-    // Version 2 stores an optional request ID for each entry.
-    writer.write_all(LOG_MAGIC)?;
+    // Version 3 represents command and no-op entries explicitly.
+    writer.write_all(LOG_MAGIC_V3)?;
     writer.write_all(&(log.len() as u64).to_le_bytes())?;
 
     for entry in log.iter() {
-        writer.write_all(
-            &entry.term.value().to_le_bytes(),
-        )?;
-
-        match entry.request_id() {
-            Some(request_id) => {
-                writer.write_all(&[1])?;
-                write_bytes(writer, request_id.as_bytes())?;
-            }
-            None => {
+        writer.write_all(&entry.term.value().to_le_bytes())?;
+        match &entry.kind {
+            LogEntryKind::Command { command, request_id } => {
                 writer.write_all(&[0])?;
+                match request_id {
+                    Some(request_id) => {
+                        writer.write_all(&[1])?;
+                        write_bytes(writer, request_id.as_bytes())?;
+                    }
+                    None => writer.write_all(&[0])?,
+                }
+                write_bytes(writer, command.as_ref().as_bytes())?;
             }
+            LogEntryKind::Noop => writer.write_all(&[1])?,
         }
-
-        // Store the application command.
-        write_bytes(
-            writer,
-            entry.command.as_ref().as_bytes(),
-        )?;
     }
 
     Ok(())
@@ -115,13 +112,12 @@ where
     C: From<String>,
     R: Read,
 {
-    let mut magic = vec![0_u8; LOG_MAGIC.len()];
+    let mut magic = vec![0_u8; LOG_MAGIC_V3.len()];
     reader.read_exact(&mut magic)?;
 
-    if magic != LOG_MAGIC {
-        return Err(invalid_data(
-            "unsupported or invalid Raft log format",
-        ));
+    let is_v2 = magic == LOG_MAGIC_V2;
+    if !is_v2 && magic != LOG_MAGIC_V3 {
+        return Err(invalid_data("invalid Raft log file"));
     }
 
     let entry_count = read_u64(reader)?;
@@ -129,37 +125,54 @@ where
 
     for _ in 0..entry_count {
         let term = Term::new(read_u64(reader)?);
-
-        let mut request_id_marker = [0_u8; 1];
-        reader.read_exact(&mut request_id_marker)?;
-
-        let request_id = match request_id_marker[0] {
-            0 => None,
-            1 => Some(read_string(reader, "request ID")?),
-            _ => {
-                return Err(invalid_data("invalid request ID marker"));
+        let entry = if is_v2 {
+            // Version 2 always stores a command after request-ID metadata.
+            let request_id = read_request_id(reader)?;
+            let command = C::from(read_string(reader, "log command")?);
+            match request_id {
+                Some(request_id) => {
+                    LogEntry::new_client_command(term, request_id, command)
+                }
+                None => LogEntry::new(term, command),
+            }
+        } else {
+            let mut kind_marker = [0_u8; 1];
+            reader.read_exact(&mut kind_marker)?;
+            match kind_marker[0] {
+                0 => {
+                    let request_id = read_request_id(reader)?;
+                    let command = C::from(
+                        read_string(reader, "log command")?,
+                    );
+                    match request_id {
+                        Some(request_id) => {
+                            LogEntry::new_client_command(
+                                term, request_id, command,
+                            )
+                        }
+                        None => LogEntry::new(term, command),
+                    }
+                }
+                1 => LogEntry::new_noop(term),
+                _ => return Err(invalid_data("invalid log entry kind")),
             }
         };
-
-        let command = read_string(reader, "log command")?;
-        let command = C::from(command);
-
-        let entry = match request_id {
-            Some(request_id) => LogEntry::new_client_command(
-                term,
-                request_id,
-                command,
-            ),
-            None => LogEntry::new(
-                term,
-                command,
-            ),
-        };
-
         log.append(entry);
     }
 
     Ok(log)
+}
+
+fn read_request_id<R: Read>(
+    reader: &mut R,
+) -> Result<Option<String>, io::Error> {
+    let mut marker = [0_u8; 1];
+    reader.read_exact(&mut marker)?;
+    match marker[0] {
+        0 => Ok(None),
+        1 => Ok(Some(read_string(reader, "request ID")?)),
+        _ => Err(invalid_data("invalid request ID marker")),
+    }
 }
 
 fn write_bytes<W: Write>(
