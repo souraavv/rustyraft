@@ -1,0 +1,40 @@
+name: Real Simulation
+
+on:
+  push:
+    branches:
+      - main
+      - feat/submit-command-via-client
+
+  pull_request:
+    branches:
+      - main
+      - feat/submit-command-via-client
+
+permissions:
+  contents: read
+
+jobs:
+  real-simulation:
+    name: Real Simulation (${{ matrix.nodes }} nodes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        nodes: [3, 5, 7]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run real cluster simulation
+        env:
+          NODE_COUNT: ${{ matrix.nodes }}
+        run: |
+          python3 tests/real-simulation/rustyraft.py \
+            --nodes "$NODE_COUNT"
