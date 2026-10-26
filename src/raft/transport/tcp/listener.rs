@@ -15,6 +15,19 @@ use super::error::TcpTransportError;
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
+// Delay before retrying accept after a listener error. The delay doubles
+// after consecutive failures and is capped to avoid a tight retry loop.
+const INITIAL_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const MAX_ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(5);
+const MAX_ACCEPT_RETRY_BACKOFF_EXPONENT: u32 = 6;
+
+fn accept_retry_delay(consecutive_errors: u32) -> Duration {
+    let exponent =
+        consecutive_errors.min(MAX_ACCEPT_RETRY_BACKOFF_EXPONENT);
+    let multiplier = 2u32.pow(exponent);
+    (INITIAL_ACCEPT_RETRY_DELAY * multiplier).min(MAX_ACCEPT_RETRY_DELAY)
+}
+
 pub struct TcpListenerService {
     /// Identity of the local Raft server.
     local_server_id: ServerId,
@@ -53,17 +66,33 @@ impl TcpListenerService {
         established_sender: mpsc::Sender<TcpConnection>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
+            let mut consecutive_accept_errors = 0u32;
+
             loop {
                 // Step 1. Ask listener to accept the incoming
                 // client connection
                 let (stream, address) =
                     match self.listener.accept().await {
-                        Ok(accepted) => accepted,
+                        Ok(accepted) => {
+                            consecutive_accept_errors = 0;
+                            accepted
+                        }
                         Err(error) => {
+                            let retry_delay =
+                                accept_retry_delay(consecutive_accept_errors);
+                            consecutive_accept_errors =
+                                consecutive_accept_errors.saturating_add(1);
+
                             tracing::warn!(
                                 ?error,
-                                "Failed to accept TCP connection"
+                                ?retry_delay,
+                                consecutive_errors = consecutive_accept_errors,
+                                "Failed to accept TCP connection; retrying with backoff"
                             );
+
+                            // Aborting this listener task during shutdown
+                            // also cancels the pending retry sleep.
+                            tokio::time::sleep(retry_delay).await;
                             continue;
                         }
                     };
@@ -117,5 +146,46 @@ impl TcpListenerService {
                 });
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        accept_retry_delay,
+        MAX_ACCEPT_RETRY_DELAY,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn accept_retry_delay_doubles_after_consecutive_errors() {
+        assert_eq!(
+            accept_retry_delay(0),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            accept_retry_delay(1),
+            Duration::from_millis(200)
+        );
+        assert_eq!(
+            accept_retry_delay(2),
+            Duration::from_millis(400)
+        );
+        assert_eq!(
+            accept_retry_delay(5),
+            Duration::from_millis(3200)
+        );
+    }
+
+    #[test]
+    fn accept_retry_delay_stays_within_the_configured_cap() {
+        assert_eq!(
+            accept_retry_delay(6),
+            MAX_ACCEPT_RETRY_DELAY
+        );
+        assert_eq!(
+            accept_retry_delay(u32::MAX),
+            MAX_ACCEPT_RETRY_DELAY
+        );
     }
 }
