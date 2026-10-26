@@ -21,10 +21,12 @@ const INITIAL_ACCEPT_RETRY_DELAY: Duration = Duration::from_millis(100);
 const MAX_ACCEPT_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MAX_ACCEPT_RETRY_BACKOFF_EXPONENT: u32 = 6;
 
+/// Calculates a bounded delay before retrying a failed accept.
 fn accept_retry_delay(consecutive_errors: u32) -> Duration {
     let exponent =
         consecutive_errors.min(MAX_ACCEPT_RETRY_BACKOFF_EXPONENT);
     let multiplier = 2u32.pow(exponent);
+
     (INITIAL_ACCEPT_RETRY_DELAY * multiplier).min(MAX_ACCEPT_RETRY_DELAY)
 }
 
@@ -86,7 +88,8 @@ impl TcpListenerService {
                             tracing::warn!(
                                 ?error,
                                 ?retry_delay,
-                                consecutive_errors = consecutive_accept_errors,
+                                consecutive_errors =
+                                    consecutive_accept_errors,
                                 "Failed to accept TCP connection; retrying with backoff"
                             );
 
